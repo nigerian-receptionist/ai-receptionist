@@ -123,8 +123,13 @@ def run_echo_loop(*, include_llm: bool, max_seconds: float = 12.0, barge_in: boo
         ) from error
 
     stt = create_stt_adapter("stt_fw_small")
-    tts = create_tts_adapter("tts_kokoro")
-    voice = os.getenv("TTS_VOICE", "af_sarah")
+    tts_model = os.getenv("TTS_MODEL", "tts_kokoro")
+    tts = create_tts_adapter(tts_model)
+    voice = os.getenv("TTS_VOICE", "")
+    if not voice and tts_model == "tts_yarngpt2":
+        raise RuntimeError("Set TTS_VOICE to an authorized local YarnGPT2 speaker profile")
+    if not voice:
+        voice = "af_sarah"
     language = os.getenv("DEMO_LANGUAGE", "en-NG")
     llm_model = os.getenv("LITELLM_MODEL", "ollama/qwen2.5:3b")
     vad = load_silero_vad()

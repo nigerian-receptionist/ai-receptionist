@@ -13,10 +13,11 @@ requirements file pins an older PyTorch stack.
 
 ## Decision
 
-Add `WavTokenizerCodecAdapter` as an audio-codec adapter only. It accepts mono
+Add `WavTokenizerCodecAdapter` as an audio-codec adapter. It accepts mono
 24 kHz float waveforms and returns discrete codes; it decodes compatible codes
 to waveforms. It does not add YarnGPT2, another text generator, voice training,
-or a TTS adapter. Source and checkpoint paths are local and ignored. The
+or voice training. YarnGPT2 integration is recorded separately in
+[ADR 0005](0005-yarngpt2-generator.md). Source and checkpoint paths are local and ignored. The
 adapter records SHA-256 hashes for the config and checkpoint as its model
 revision.
 
@@ -28,6 +29,6 @@ revision.
   records.
 - Resampling and channel conversion remain explicit caller responsibilities.
 - A separate speech-generation model is required to convert text into
-  WavTokenizer codes for TTS.
+  WavTokenizer codes for TTS; YarnGPT2 is connected by ADR 0005.
 - Do not install the upstream full requirements file into the lab environment;
   it pins older versions than the lab's current PyTorch runtime.

@@ -47,8 +47,9 @@ tts:
     id: tts_yarngpt2
     model: saheedniyi/YarnGPT2
     license_status: Apache-2.0 model card
-    status: blocked
-    reason: training-data provenance and preset-speaker rights need clearance; upstream helper-code license unclear
+    revision: bf654c7
+    status: experimental-local-only
+    reason: experimental local evaluation only; commercial use remains pending review of public-media training provenance; do not use upstream preset speakers
   candidates:
     - id: tts_orpheus
       status: blocked

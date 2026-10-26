@@ -38,19 +38,18 @@ def create_stt_adapter(model_id: str, config_path: str | Path | None = None):
 
 def create_tts_adapter(model_id: str, config_path: str | Path | None = None):
     registry = _load_registry(config_path)
-    if model_id == registry["tts"]["baseline"]["id"]:
-        raise PermissionError(
-            f"TTS model {model_id} is blocked pending model-data, speaker-rights, "
-            "and helper-code review"
-        )
-    candidate = next(
-        (entry for entry in registry["tts"]["candidates"] if entry["id"] == model_id),
-        None,
-    )
-    if candidate is None or candidate.get("status") == "blocked":
+    entries = [registry["tts"]["baseline"], *registry["tts"]["candidates"]]
+    candidate = next((entry for entry in entries if entry["id"] == model_id), None)
+    if candidate is None or candidate.get("status") in {"blocked", "disabled"}:
         raise PermissionError(f"TTS model {model_id} is not cleared for benchmarking")
-    if model_id != "tts_kokoro":
-        raise NotImplementedError(f"No adapter is implemented for {model_id}")
-    from voicelab.adapters.tts.kokoro import KokoroAdapter
+    if model_id == "tts_yarngpt2":
+        if candidate.get("status") != "experimental-local-only":
+            raise PermissionError("YarnGPT2 is available only for local experimental evaluation")
+        from voicelab.adapters.tts.yarngpt2 import YarnGPT2Adapter
 
-    return KokoroAdapter()
+        return YarnGPT2Adapter.from_environment()
+    if model_id == "tts_kokoro":
+        from voicelab.adapters.tts.kokoro import KokoroAdapter
+
+        return KokoroAdapter()
+    raise NotImplementedError(f"No adapter is implemented for {model_id}")

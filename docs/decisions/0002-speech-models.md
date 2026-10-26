@@ -17,7 +17,7 @@ English-only synthetic prompts.
 | STT baseline | OpenAI Whisper, large-v3-turbo | MIT code and weights; checkpoint SHA pinned | Pending consented Nigerian dev set |
 | STT comparison | OpenAI Whisper, large-v3 | MIT code and weights; checkpoint SHA pinned | Pending consented Nigerian dev set |
 | STT CPU comparison | OpenAI Whisper, small | MIT code and weights; checkpoint SHA pinned | Pending consented Nigerian dev set |
-| TTS baseline | YarnGPT2 | Model card says Apache-2.0; training data, speaker rights, and helper-code rights unresolved | Blocked pending review |
+| TTS baseline | YarnGPT2 | Apache-2.0 model card; MIT upstream helper; public-media training and preset speaker rights unresolved | Local experimental evaluation only; commercial deployment pending review. See [ADR 0005](0005-yarngpt2-generator.md) |
 | TTS comparison | Kokoro-82M via kokoro-onnx | Apache-2.0 weights; MIT runtime plus GPL phonemizer/eSpeak NG dependencies. Human approval for commercial use is recorded in ADR 0003. | Synthetic English timing and one synthetic round trip only; not a Nigerian-accent baseline |
 | Codec component | WavTokenizer | MIT source and official model cards; exact checkpoint still to pin | Codec adapter only; it does not generate speech from text. See [ADR 0004](0004-wavtokenizer-codec.md) |
 
@@ -40,10 +40,11 @@ obligations for any distribution. Keep all raw clips and benchmark rows ignored.
   separate clean and phone-simulated results. Do not tune on the test split.
 - Timing summaries report p50 and p95, with at least 20 measured runs after
   warm-up.
-- TTS adoption remains blocked until the YarnGPT2 questions are resolved or a
-  different candidate is approved after comparison.
-- WavTokenizer is available as an audio codec component only. It does not
-  change the TTS model decision or supply a text-to-speech generator.
+- YarnGPT2 may be evaluated locally with a private speaker profile backed by
+  documented consent. Commercial deployment remains blocked pending data-rights
+  and speaker-rights review.
+- WavTokenizer is available as an audio codec component. YarnGPT2 generates
+  codes for it under the local-only constraints in ADR 0005.
 - No production voice or model decision is made by this ADR. Update this record
   after a complete evaluation and human review.
 
