@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Voice-lab data and model artifacts stay outside Git.
+voice-lab/data/audio/
+voice-lab/data/**/audio/
+voice-lab/results/raw/
+voice-lab/results/**/*.wav
+voice-lab/models/
+voice-lab/data/models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+
+# OS/editor
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,70 @@
+# Model candidates are experimental until their exact weights and licences are
+# verified. Never place HF_TOKEN or other credentials in this file.
+stt:
+  baseline:
+    id: stt_fw_turbo
+    package: openai-whisper
+    model: large-v3-turbo
+    model_sha256: aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a
+    license_status: MIT; verified upstream
+  candidates:
+    - id: stt_fw_large
+      package: openai-whisper
+      model: large-v3
+      model_sha256: e5b1a55b89c1367dacf97e3e19bfd829a01529dbfdeefa8caeb59b3f1b81dadb
+      license_status: MIT; verified upstream
+    - id: stt_fw_small
+      package: openai-whisper
+      model: small
+      model_sha256: 9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794
+      license_status: MIT; verified upstream
+    - id: stt_natlas_yo_ig_ha_en
+      repo: NCAIR1/{Yoruba-ASR,Igbo-ASR,Hausa-ASR,NigerianAccentedEnglish}
+      status: blocked
+      reason: custom restrictive model terms; commercial use requires separate agreement
+    - id: stt_community_multi
+      repo: yusasif/whisper-small-multilingual
+      status: blocked
+      reason: exact weight license and provenance not verified
+    - id: stt_parakeet
+      repo: nvidia/parakeet-tdt-0.6b-v3
+      license_status: CC-BY-4.0; attribution required
+      status: blocked
+      reason: section 19 requires review before use
+    - id: stt_sherpa_stream
+      repo: model-specific
+      status: blocked
+      reason: model-specific weight license not identified
+    - id: stt_vosk
+      repo: model-specific
+      status: blocked
+      reason: model-specific weight license not identified
+    - id: stt_ft_own
+      status: blocked
+      reason: no consented training dataset or training plan
+tts:
+  baseline:
+    id: tts_yarngpt2
+    model: saheedniyi/YarnGPT2
+    license_status: Apache-2.0 model card
+    status: blocked
+    reason: training-data provenance and preset-speaker rights need clearance; upstream helper-code license unclear
+  candidates:
+    - id: tts_orpheus
+      status: blocked
+      reason: base-model and weights license not verified
+    - id: tts_chatterbox
+      status: blocked
+      reason: exact model weights and voice-source terms not verified
+    - id: tts_kokoro
+      model: hexgrad/Kokoro-82M
+      runtime: kokoro-onnx
+      license_status: Apache-2.0 weights; MIT runtime, verified upstream
+      status: comparison-only
+      reason: English voice set is not a Nigerian-accent baseline
+    - id: tts_piper
+      status: blocked
+      reason: version-specific model license not verified
+    - id: tts_ft_own
+      status: blocked
+      reason: no signed voice talent license

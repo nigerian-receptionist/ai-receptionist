@@ -1,0 +1,1 @@
+"""Local speech model adapters."""
