@@ -7,6 +7,10 @@ speaker consent.
 | Component | Version / candidate | License | Commercial-use status and notes | Evidence |
 |---|---|---|---|---|
 | OpenAI Whisper | 20250625 | MIT | Allowed local runtime; uses system FFmpeg to decode audio | [Upstream license](https://github.com/openai/whisper/blob/main/LICENSE) |
+| WavTokenizer source | Official upstream repository | MIT | Codec adapter only; local source revision must be pinned before benchmark | [Upstream license](https://github.com/jishengpeng/WavTokenizer/blob/main/LICENSE) |
+| WavTokenizer checkpoint | Official `novateur/WavTokenizer` model card | MIT | No exact checkpoint selected yet; pin repository revision and file hash before use | [Official model repository](https://huggingface.co/novateur/WavTokenizer) |
+| torchaudio | Optional codec runtime | BSD | Allowed; CPU wheel is resolved from the PyTorch CPU index | [Upstream setup metadata](https://github.com/pytorch/audio/blob/main/setup.py) |
+| einops | Optional codec runtime | MIT | Allowed | [Upstream license](https://github.com/arogozhnikov/einops/blob/main/LICENSE) |
 | Whisper large-v3-turbo | Official checkpoint SHA `aff26ae4…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |
 | Whisper large-v3 | Official checkpoint SHA `e5b1a55b…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |
 | Whisper small | Official checkpoint SHA `9ecf7799…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |
@@ -25,7 +29,7 @@ speaker consent.
 | PyTorch | 2.14.1 CPU wheel | BSD-3-Clause | Allowed as Silero VAD's runtime dependency; the lock pins the CPU-only wheel and excludes CUDA packages | [Upstream license](https://github.com/pytorch/pytorch/blob/main/LICENSE), [CPU wheel index](https://download.pytorch.org/whl/cpu) |
 | N-ATLaS | NCAIR1 gated models | Custom research and innovation terms | Blocked; not OSI open source and commercial use needs separate agreement | [Model card](https://huggingface.co/NCAIR1/N-ATLaS) |
 | NVIDIA Parakeet TDT 0.6B v3 | Official model | CC-BY-4.0 | Blocked pending required attribution review | [Model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) |
-| YarnGPT2 | `saheedniyi/YarnGPT2` | Apache-2.0 model card | Blocked pending training-data provenance, preset speaker rights, and helper-code license review | [Model card](https://huggingface.co/saheedniyi/YarnGPT2) |
+| YarnGPT2 | `saheedniyi/YarnGPT2` | Apache-2.0 model card; MIT upstream helper | Local experimental evaluation only; commercial deployment pending review of public-media training provenance. Runtime requires a private profile with documented speaker consent. | [Model card](https://huggingface.co/saheedniyi/YarnGPT2), [helper repository](https://github.com/saheedniyi02/yarngpt) |
 | Orpheus / Chatterbox / Piper / Vosk / sherpa models | Exact artifacts not selected | Unknown or artifact-specific | Blocked until exact weights, runtime, and provenance are reviewed | See candidate notes in [`../../voice-lab/licences.md`](../../voice-lab/licences.md) |
 
 The direct live-demo libraries are license-checked. Run an automated license

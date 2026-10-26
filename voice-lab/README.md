@@ -15,15 +15,15 @@ cd ..
 pre-commit install
 ```
 
-The lab includes local Whisper STT and Kokoro TTS adapters, benchmark runners,
+The lab includes local Whisper STT, Kokoro TTS, and experimental YarnGPT2 TTS adapters, benchmark runners,
 and round-trip and microphone demo scripts. Candidate status and license notes
 are tracked in `licences.md`; blocked models cannot be loaded through the
 registry.
 
-The `speech`, `tts`, and `live` dependency groups are separated so you can
-install only the parts needed. `uv.lock` pins the resolved versions. The exact
-Kokoro ONNX model files are downloaded separately and stay under ignored
-`models/kokoro/`.
+The `speech`, `tts`, `codec`, `yarngpt2`, and `live` dependency groups are separated so you
+can install only the parts needed. `uv.lock` pins the resolved versions. Model
+files and the upstream WavTokenizer source checkout stay under ignored
+`models/`.
 
 ## Audio data and privacy
 
@@ -50,6 +50,70 @@ python scripts/download_kokoro_assets.py
 Set `KOKORO_MODEL_PATH` and `KOKORO_VOICES_PATH` to the downloaded files (or
 copy `.env.example` to a private `.env`). Models stay local; blocked candidates
 are refused by `model_registry.py`.
+
+## YarnGPT2 TTS generator and WavTokenizer codec
+
+WavTokenizer is an audio codec, not a text-to-speech model. Its adapter only
+encodes mono waveforms to discrete codes and decodes codes back to waveforms;
+it does not generate speech from text. YarnGPT2 generates those codes from text,
+then the adapter decodes them to 24 kHz audio. YarnGPT2 is experimental and
+available for local evaluation only; its model card describes public-media
+training sources and experimental use. Commercial adoption needs a separate
+review of data provenance and speaker rights. The model card identifies the
+weights as Apache-2.0; its visible current commit is `bf654c7`.
+
+```sh
+uv sync --group codec --group yarngpt2 --locked
+git clone --depth 1 https://github.com/jishengpeng/WavTokenizer.git models/wavtokenizer/WavTokenizer
+```
+
+Download a compatible WavTokenizer config and checkpoint from the official
+model repository into `models/wavtokenizer/`, then set `WAVTOKENIZER_ROOT`,
+`WAVTOKENIZER_CONFIG_PATH`, and `WAVTOKENIZER_CHECKPOINT_PATH` (see
+`.env.example`). Set the YarnGPT2 variables there as well. Its model weights
+download from Hugging Face on first use unless `YARNGPT2_LOCAL_FILES_ONLY=true`.
+They stay in the local Hugging Face cache. Set `YARNGPT2_REVISION` to a reviewed
+immutable commit, `YARNGPT2_SPEAKERS_DIR` to a private folder of speaker profiles,
+and `TTS_MODEL=tts_yarngpt2`. Each profile is a private JSON file named
+`{voice_id}.json` and needs the upstream `text` and aligned `words` fields, plus
+`voice_use_authorized: true` and a `consent_id` matching a written permission
+record. `words` entries contain `word`, `duration`, and integer `codes` fields.
+Create profiles only from the speaker's own recording or another voice with
+documented permission for AI speech generation. Do not use upstream preset
+profiles: their likeness rights are not cleared here. The profile directory is
+ignored under `models/` and must not be committed.
+
+To synthesize one sentence or start the microphone echo demo, use your profile
+ID as the voice:
+
+```sh
+python scripts/tts_smoke.py "Hello, how can I help you today?" --model tts_yarngpt2 --voice my_consented_voice --output /tmp/yarn.wav
+TTS_MODEL=tts_yarngpt2 TTS_VOICE=my_consented_voice python scripts/echo_loop.py
+```
+
+The echo loop does not use an LLM. `llm_loop.py` is a separate optional demo.
+YarnGPT2 generates a full utterance before playback; its sentence chunking is
+emulated, not true token streaming. The upstream project is source-based and documents an older
+requirements file; do not install that file wholesale into the voice-lab
+environment because it pins different PyTorch versions. The adapter lazily
+loads the source and records SHA-256 hashes for its local config and checkpoint.
+Input audio must already be mono, float32, normalized to [-1, 1], and sampled at
+24 kHz; resample explicitly before encoding.
+
+```python
+import torch
+
+from voicelab.adapters.codec.wavtokenizer import WavTokenizerCodecAdapter
+
+codec = WavTokenizerCodecAdapter.from_environment()
+waveform = torch.zeros(24_000, dtype=torch.float32)  # replace with local audio
+codes = codec.encode(waveform, sample_rate_hz=24_000)
+reconstructed = codec.decode(codes)
+```
+
+Pin the codec model repository revision before benchmarking. The code and official
+model cards identify WavTokenizer as MIT-licensed; see the
+[license record](../docs/decisions/licences.md).
 
 ## Commands
 

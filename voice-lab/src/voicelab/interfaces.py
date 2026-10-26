@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 
 @dataclass(frozen=True)
@@ -101,3 +101,17 @@ class TextToSpeech(Protocol):
         tone: str = "neutral",
         speed: float = 1.0,
     ) -> AsyncIterator[AudioChunk]: ...
+
+
+class AudioCodec(Protocol):
+    """Encode mono waveforms to discrete codes and decode codes to waveforms."""
+
+    model_id: str
+    model_revision: str
+    sample_rate_hz: int
+
+    def encode(
+        self, waveform: Any, *, sample_rate_hz: int = 24000, bandwidth_id: int = 0
+    ) -> Any: ...
+
+    def decode(self, codes: Any, *, bandwidth_id: int = 0) -> Any: ...
