@@ -18,6 +18,9 @@ blocked are not loaded by the registry.
 | Orpheus | Exact weights and base-model terms not verified | Blocked | Verify exact checkpoint and full license chain |
 | Chatterbox | Exact weight revision, voice source, and reference-voice terms not verified | Blocked | Verify before use; no voice cloning in this benchmark |
 | Kokoro-82M | Apache-2.0 weights; MIT kokoro-onnx runtime plus GPL phonemizer 3.4.0 and eSpeak NG via espeakng-loader 0.2.4 | Approved for this lab after human approval for commercial use; follow GPL obligations before distribution. The voice is only an English comparison, not a Nigerian-accent baseline. | [Kokoro model card](https://huggingface.co/hexgrad/Kokoro-82M), [runtime dependency metadata](https://simple-repository.app.cern.ch/project/kokoro-onnx), [phonemizer](https://github.com/bootphon/phonemizer), [eSpeak NG](https://github.com/espeak-ng/espeak-ng) |
+| WavTokenizer source and checkpoint | Official source and model card identify MIT | Codec-only adapter; no exact checkpoint revision is selected yet. Pin source and weights before benchmark. | [Source repository](https://github.com/jishengpeng/WavTokenizer), [model cards](https://huggingface.co/novateur/WavTokenizer) |
+| torchaudio | BSD | Allowed; optional codec runtime from the PyTorch CPU index | [Upstream setup metadata](https://github.com/pytorch/audio/blob/main/setup.py) |
+| einops | MIT | Allowed; optional codec runtime | [Upstream license](https://github.com/arogozhnikov/einops/blob/main/LICENSE) |
 | Piper | License varies by voice and version | Blocked | Review the exact voice artifact and runtime version |
 | Own fine-tunes | Dependent on base model and training-data / voice-talent licenses | Blocked | No consented training dataset or signed voice-talent license is available |
 

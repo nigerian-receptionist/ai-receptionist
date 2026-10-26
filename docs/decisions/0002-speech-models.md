@@ -19,6 +19,7 @@ English-only synthetic prompts.
 | STT CPU comparison | OpenAI Whisper, small | MIT code and weights; checkpoint SHA pinned | Pending consented Nigerian dev set |
 | TTS baseline | YarnGPT2 | Model card says Apache-2.0; training data, speaker rights, and helper-code rights unresolved | Blocked pending review |
 | TTS comparison | Kokoro-82M via kokoro-onnx | Apache-2.0 weights; MIT runtime plus GPL phonemizer/eSpeak NG dependencies. Human approval for commercial use is recorded in ADR 0003. | Synthetic English timing and one synthetic round trip only; not a Nigerian-accent baseline |
+| Codec component | WavTokenizer | MIT source and official model cards; exact checkpoint still to pin | Codec adapter only; it does not generate speech from text. See [ADR 0004](0004-wavtokenizer-codec.md) |
 
 N-ATLaS, Parakeet, community weights, Orpheus, Chatterbox, Piper, and
 fine-tunes remain blocked until the exact license and provenance checks in
@@ -41,6 +42,8 @@ obligations for any distribution. Keep all raw clips and benchmark rows ignored.
   warm-up.
 - TTS adoption remains blocked until the YarnGPT2 questions are resolved or a
   different candidate is approved after comparison.
+- WavTokenizer is available as an audio codec component only. It does not
+  change the TTS model decision or supply a text-to-speech generator.
 - No production voice or model decision is made by this ADR. Update this record
   after a complete evaluation and human review.
 

@@ -7,6 +7,10 @@ speaker consent.
 | Component | Version / candidate | License | Commercial-use status and notes | Evidence |
 |---|---|---|---|---|
 | OpenAI Whisper | 20250625 | MIT | Allowed local runtime; uses system FFmpeg to decode audio | [Upstream license](https://github.com/openai/whisper/blob/main/LICENSE) |
+| WavTokenizer source | Official upstream repository | MIT | Codec adapter only; local source revision must be pinned before benchmark | [Upstream license](https://github.com/jishengpeng/WavTokenizer/blob/main/LICENSE) |
+| WavTokenizer checkpoint | Official `novateur/WavTokenizer` model card | MIT | No exact checkpoint selected yet; pin repository revision and file hash before use | [Official model repository](https://huggingface.co/novateur/WavTokenizer) |
+| torchaudio | Optional codec runtime | BSD | Allowed; CPU wheel is resolved from the PyTorch CPU index | [Upstream setup metadata](https://github.com/pytorch/audio/blob/main/setup.py) |
+| einops | Optional codec runtime | MIT | Allowed | [Upstream license](https://github.com/arogozhnikov/einops/blob/main/LICENSE) |
 | Whisper large-v3-turbo | Official checkpoint SHA `aff26ae4…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |
 | Whisper large-v3 | Official checkpoint SHA `e5b1a55b…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |
 | Whisper small | Official checkpoint SHA `9ecf7799…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |
