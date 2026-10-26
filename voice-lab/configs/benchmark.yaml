@@ -1,0 +1,16 @@
+python_version: "3.12"
+seed: 42
+audio:
+  internal_sample_rate_hz: 16000
+  phone_sample_rate_hz: 8000
+  channels: 1
+  phone_codec: pcm_mulaw
+dataset:
+  manifest_dir: data/manifests
+  audio_dir: data/audio
+  allowed_splits: [dev, test]
+  tune_on_test: false
+timing:
+  warmup_runs: 1
+  measured_runs: 20
+  percentiles: [50, 95]

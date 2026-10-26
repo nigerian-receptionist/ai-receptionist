@@ -1,0 +1,10 @@
+data/audio/
+data/**/audio/
+results/raw/
+results/**/*.wav
+models/
+data/models/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
