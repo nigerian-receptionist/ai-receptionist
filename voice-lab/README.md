@@ -67,8 +67,13 @@ uv sync --group codec --group yarngpt2 --locked
 git clone --depth 1 https://github.com/jishengpeng/WavTokenizer.git models/wavtokenizer/WavTokenizer
 ```
 
-Download a compatible WavTokenizer config and checkpoint from the official
-model repository into `models/wavtokenizer/`, then set `WAVTOKENIZER_ROOT`,
+YarnGPT2's published inference example pairs the medium speech config
+`wavtokenizer_mediumdata_frame75_3s_nq1_code4096_dim512_kmeans200_attn.yaml`
+with the **large speech** checkpoint `wavtokenizer_large_speech_320_24k.ckpt`.
+The similarly named medium checkpoint is not a drop-in replacement: speaker
+profiles must be encoded with the same large checkpoint used for decoding.
+Download that checkpoint and config from the official WavTokenizer repositories
+into `models/wavtokenizer/`, then set `WAVTOKENIZER_ROOT`,
 `WAVTOKENIZER_CONFIG_PATH`, and `WAVTOKENIZER_CHECKPOINT_PATH` (see
 `.env.example`). Set the YarnGPT2 variables there as well. Its model weights
 download from Hugging Face on first use unless `YARNGPT2_LOCAL_FILES_ONLY=true`.
@@ -122,8 +127,9 @@ this project's YarnGPT2 adapter. Underdog Bark is selectable as the separate
 speech recognition model with `--stt-model underdog`.
 
 The echo loop does not use an LLM. `llm_loop.py` is a separate optional demo.
-YarnGPT2 generates a full utterance before playback; its sentence chunking is
-emulated, not true token streaming. The upstream project is source-based and documents an older
+YarnGPT2 runs on CPU here and can take many seconds per sentence. It generates
+a full sentence before playback; its sentence chunking is emulated, not true
+token streaming. For responsive conversations, use Kokoro. The upstream project is source-based and documents an older
 requirements file; do not install that file wholesale into the voice-lab
 environment because it pins different PyTorch versions. The adapter lazily
 loads the source and records SHA-256 hashes for its local config and checkpoint.

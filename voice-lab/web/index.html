@@ -328,14 +328,22 @@
     $('talkButton').addEventListener('click', async () => { if (busy) return; if (recording) { busy = true; await stopRecording(); } else await startRecording(); });
     $('ttsSelect').addEventListener('change', () => {
       const yarn = $('ttsSelect').value === 'tts_yarngpt2';
-      $('ttsDetail').textContent = yarn ? 'YarnGPT2 · requires a local consented voice profile.' : 'Kokoro · choose a voice below.';
-      $('voiceDetail').textContent = yarn ? 'Only authorized local profiles appear here.' : 'English voice · local synthesis.';
+      $('ttsDetail').textContent = yarn
+        ? 'YarnGPT2 · experimental and slow on this CPU; use Kokoro for faster live replies. Only your authorized local voices are listed.'
+        : 'Kokoro · choose a voice below.';
+      $('voiceDetail').textContent = yarn
+        ? `Your authorized local voices: ${yarnVoices.join(', ') || 'none found'}.`
+        : 'English voice · local synthesis.';
       $('voiceSelect').replaceChildren();
       if (yarn) {
         if (!yarnVoices.length) {
           const option = document.createElement('option'); option.value = ''; option.textContent = 'No authorized profile found'; $('voiceSelect').append(option);
         } else {
-          for (const id of yarnVoices) { const option = document.createElement('option'); option.value = id; option.textContent = `${id} · authorized profile`; $('voiceSelect').append(option); }
+          for (const id of yarnVoices) {
+            const option = document.createElement('option'); option.value = id;
+            const name = id.replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+            option.textContent = `${name} · authorized voice`; $('voiceSelect').append(option);
+          }
         }
       } else {
         for (const [id, label] of kokoroVoices) { const option = document.createElement('option'); option.value = id; option.textContent = label; $('voiceSelect').append(option); }

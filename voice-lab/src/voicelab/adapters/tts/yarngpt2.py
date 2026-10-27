@@ -53,11 +53,20 @@ class YarnGPT2Adapter:
         self._torch = torch
         self._number_engine = inflect.engine()
         self._device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        if self._device == "cpu":
+            # The upstream checkpoint is bfloat16, but this CPU has no native
+            # BF16 vector instructions. Converting to FP32 avoids the very slow
+            # emulated BF16 path during token-by-token generation.
+            torch.set_num_threads(int(os.getenv("YARNGPT2_CPU_THREADS", "4")))
+        model_dtype = "auto" if self._device != "cpu" else torch.float32
         self._tokenizer = AutoTokenizer.from_pretrained(
             model_id, revision=revision, local_files_only=local_files_only
         )
         self._model = AutoModelForCausalLM.from_pretrained(
-            model_id, revision=revision, local_files_only=local_files_only, torch_dtype="auto"
+            model_id,
+            revision=revision,
+            local_files_only=local_files_only,
+            dtype=model_dtype,
         ).to(self._device).eval()
         self.model_revision = revision
         self._max_new_tokens = max_new_tokens
@@ -128,18 +137,23 @@ class YarnGPT2Adapter:
         return voices
 
     def _prompt_text(self, text: str) -> str:
-        # Keep the English prompt normalization used by upstream's tokenizer.
+        # Match YarnGPT's tokenizer: normalize punctuation, romanize English
+        # words, then place a <|text_sep|> token between every word.
         normalized = re.sub(
             r"\d+(?:\.\d+)?",
             lambda match: self._number_engine.number_to_words(match.group()),
             text.lower(),
-        ).replace("-", " ").replace("_", " ")
-        normalized = re.sub(r"[^a-z\s]", " ", normalized)
+        )
+        normalized = re.sub(r"[-_/,\.\\]", " ", normalized)
+        normalized = re.sub(r"[^a-z\s]", "", normalized)
         return " ".join(normalized.split())
 
     def _make_prompt(self, text: str, profile: dict[str, Any]) -> str:
-        words = f"<|text_sep|>".join(
-            word for word in (self._prompt_text(profile["text"]), self._prompt_text(text)) if word
+        words = "<|text_sep|>".join(
+            [
+                *self._prompt_text(profile["text"]).split(),
+                *self._prompt_text(text).split(),
+            ]
         )
         prompt = f"<|im_start|>\n<|text_start|>{words}<|text_end|>\n<|english|>\n<|audio_start|>\n"
         for entry in profile["words"]:
@@ -179,18 +193,20 @@ class YarnGPT2Adapter:
             generated = self._model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                temperature=0.1,
                 repetition_penalty=1.1,
-                do_sample=True,
+                # Match the upstream YarnGPT2 inference path. Sampling can
+                # prematurely emit EOS on CPU and return no usable audio codes.
+                do_sample=False,
                 max_new_tokens=self._max_new_tokens,
                 pad_token_id=self._tokenizer.eos_token_id,
             )
-        generated_text = self._tokenizer.decode(
-            generated[0, input_ids.shape[1] :], skip_special_tokens=False
-        )
+        generated_text = self._tokenizer.decode(generated[0, input_ids.shape[1] :])
         codes = [int(code) for code in re.findall(r"\|(-?\d+)\|", generated_text)]
         if not codes:
-            raise RuntimeError("YarnGPT2 generated no WavTokenizer audio codes")
+            raise RuntimeError(
+                "YarnGPT2 returned no audio codes. Its prompt/profile may be incompatible; "
+                "try another authorized voice profile or a shorter reply."
+            )
         if any(code < 0 or code > 4095 for code in codes):
             raise RuntimeError("YarnGPT2 returned an audio code outside WavTokenizer's codebook")
         # Upstream YarnGPT2 emits a flat sequence for the single active codebook.

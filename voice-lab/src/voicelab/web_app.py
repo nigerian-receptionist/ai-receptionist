@@ -235,6 +235,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
                     ),
                 )
                 return
+            phase = f"loading {request.tts_model}"
             tts = _tts(request.tts_model)
             language = os.getenv("DEMO_LANGUAGE", "en-NG")
             safe_history = [
@@ -246,6 +247,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
             try:
                 from litellm import completion
 
+                phase = "asking Ollama for a reply"
                 llm_started = time.perf_counter()
                 response_stream = completion(
                     model=os.getenv("LITELLM_MODEL", "ollama/qwen2.5:3b"),
@@ -280,6 +282,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
                             continue
                         safe_sentence = redact_for_storage(sentence)
                         yield _stream_event("text", text=safe_sentence)
+                        phase = f"synthesizing with {request.tts_model}"
                         speech_started = time.perf_counter()
                         audio = tts.synthesize(
                             safe_sentence, voice_id=request.voice_id, language=language
@@ -301,10 +304,12 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
                                 _wav_response(audio.pcm_s16le, audio.sample_rate)
                             ).decode("ascii"),
                         )
+                        phase = "asking Ollama for a reply"
                 tail = pending_text.strip()
                 if tail:
                     safe_tail = redact_for_storage(tail)
                     yield _stream_event("text", text=safe_tail)
+                    phase = f"synthesizing with {request.tts_model}"
                     speech_started = time.perf_counter()
                     audio = tts.synthesize(
                         safe_tail, voice_id=request.voice_id, language=language
@@ -333,13 +338,25 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
                     timings=timings,
                 )
             except Exception as error:
-                logger.exception("Voice turn failed while answering or speaking")
+                logger.exception("Voice turn failed while %s", phase)
+                if phase == "asking Ollama for a reply":
+                    message = (
+                        f"Ollama could not finish the reply ({type(error).__name__}). "
+                        "Check that Ollama is running and its configured model is loaded."
+                    )
+                elif request.tts_model == "tts_yarngpt2":
+                    message = (
+                        f"YarnGPT2 couldn't synthesize this reply ({type(error).__name__}). "
+                        "Try a shorter reply, another authorized voice, or Kokoro."
+                    )
+                else:
+                    message = (
+                        f"Kokoro couldn't synthesize this reply ({type(error).__name__}). "
+                        "Check that its local voice assets are available."
+                    )
                 yield _stream_event(
                     "error",
-                    message=(
-                        f"The assistant couldn't finish the reply ({type(error).__name__}). "
-                        "Check that Ollama is running and Kokoro is available."
-                    ),
+                    message=message,
                 )
         except (ValueError, wave.Error, base64.binascii.Error) as error:
             yield _stream_event("error", message=f"Invalid recording: {error}")
