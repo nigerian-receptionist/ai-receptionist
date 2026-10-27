@@ -21,6 +21,7 @@ blocked are not loaded by the registry.
 | WavTokenizer source and checkpoint | Official source and model card identify MIT | Codec-only adapter; no exact checkpoint revision is selected yet. Pin source and weights before benchmark. | [Source repository](https://github.com/jishengpeng/WavTokenizer), [model cards](https://huggingface.co/novateur/WavTokenizer) |
 | torchaudio | BSD | Allowed; optional codec runtime from the PyTorch CPU index | [Upstream setup metadata](https://github.com/pytorch/audio/blob/main/setup.py) |
 | einops | MIT | Allowed; optional codec runtime | [Upstream license](https://github.com/arogozhnikov/einops/blob/main/LICENSE) |
+| SciPy | BSD-3-Clause | Allowed; required by the official WavTokenizer decoder's spectral operations | [Upstream license](https://github.com/scipy/scipy/blob/main/LICENSE.txt) |
 | Piper | License varies by voice and version | Blocked | Review the exact voice artifact and runtime version |
 | Own fine-tunes | Dependent on base model and training-data / voice-talent licenses | Blocked | No consented training dataset or signed voice-talent license is available |
 

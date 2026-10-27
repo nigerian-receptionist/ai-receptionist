@@ -173,14 +173,17 @@ class YarnGPT2Adapter:
             self._make_prompt(text, profile), add_special_tokens=False, return_tensors="pt"
         )
         input_ids = tokenized["input_ids"].to(self._device)
+        attention_mask = tokenized["attention_mask"].to(self._device)
         started = time.perf_counter()
         with self._torch.inference_mode():
             generated = self._model.generate(
                 input_ids=input_ids,
+                attention_mask=attention_mask,
                 temperature=0.1,
                 repetition_penalty=1.1,
                 do_sample=True,
                 max_new_tokens=self._max_new_tokens,
+                pad_token_id=self._tokenizer.eos_token_id,
             )
         generated_text = self._tokenizer.decode(
             generated[0, input_ids.shape[1] :], skip_special_tokens=False

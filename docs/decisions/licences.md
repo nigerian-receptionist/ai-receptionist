@@ -11,6 +11,7 @@ speaker consent.
 | WavTokenizer checkpoint | Official `novateur/WavTokenizer` model card | MIT | No exact checkpoint selected yet; pin repository revision and file hash before use | [Official model repository](https://huggingface.co/novateur/WavTokenizer) |
 | torchaudio | Optional codec runtime | BSD | Allowed; CPU wheel is resolved from the PyTorch CPU index | [Upstream setup metadata](https://github.com/pytorch/audio/blob/main/setup.py) |
 | einops | Optional codec runtime | MIT | Allowed | [Upstream license](https://github.com/arogozhnikov/einops/blob/main/LICENSE) |
+| SciPy | Optional WavTokenizer runtime | BSD-3-Clause | Allowed; required by upstream spectral operations | [Upstream license](https://github.com/scipy/scipy/blob/main/LICENSE.txt) |
 | Whisper large-v3-turbo | Official checkpoint SHA `aff26ae4…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |
 | Whisper large-v3 | Official checkpoint SHA `e5b1a55b…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |
 | Whisper small | Official checkpoint SHA `9ecf7799…` | MIT | Allowed for local evaluation; SHA pinned in model config | [Official code and checkpoint hash](https://github.com/openai/whisper/blob/main/whisper/__init__.py) |

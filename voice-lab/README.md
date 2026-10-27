@@ -83,6 +83,24 @@ documented permission for AI speech generation. Do not use upstream preset
 profiles: their likeness rights are not cleared here. The profile directory is
 ignored under `models/` and must not be committed.
 
+To build a profile from a corrected WhisperX result and its matching mono 24 kHz
+PCM16 WAV, save a private consent record containing the matching `consent_id`
+and `voice_use_authorized: true`, then run:
+
+```sh
+python scripts/build_yarngpt2_profile.py \
+  --audio models/yarngpt2/reference_24k.wav \
+  --alignment outputs/Voice-ai-corrected.json \
+  --voice-id my_consented_voice \
+  --consent-id your-private-consent-id \
+  --consent-record models/yarngpt2/consent-record.json
+```
+
+The script encodes the full reference once and slices the resulting code frames
+by each corrected top-level `word_segments` time span. Keep the consent record,
+alignment, WAV, and generated profile local and ignored. Review the transcript
+and timings first; this process does not validate consent or correct alignment.
+
 To synthesize one sentence or start the microphone echo demo, use your profile
 ID as the voice:
 
