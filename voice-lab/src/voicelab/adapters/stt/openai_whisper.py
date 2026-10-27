@@ -70,6 +70,7 @@ class OpenAIWhisperAdapter:
         *,
         language: str | None = None,
         hints: list[str] | None = None,
+        word_timestamps: bool = True,
     ) -> SttResult:
         input_path = Path(path)
         duration_s = _wav_duration(input_path)
@@ -79,7 +80,10 @@ class OpenAIWhisperAdapter:
             str(input_path),
             language=language_code,
             initial_prompt="; ".join(hints or []) or None,
-            word_timestamps=True,
+            # Word alignment runs a second, expensive DTW pass. Voice chat only
+            # needs the transcript; profile-building and benchmark callers can
+            # continue to request timings explicitly.
+            word_timestamps=word_timestamps,
             condition_on_previous_text=False,
             fp16=self.device != "cpu",
             verbose=False,

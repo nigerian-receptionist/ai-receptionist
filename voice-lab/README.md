@@ -67,8 +67,13 @@ uv sync --group codec --group yarngpt2 --locked
 git clone --depth 1 https://github.com/jishengpeng/WavTokenizer.git models/wavtokenizer/WavTokenizer
 ```
 
-Download a compatible WavTokenizer config and checkpoint from the official
-model repository into `models/wavtokenizer/`, then set `WAVTOKENIZER_ROOT`,
+YarnGPT2's published inference example pairs the medium speech config
+`wavtokenizer_mediumdata_frame75_3s_nq1_code4096_dim512_kmeans200_attn.yaml`
+with the **large speech** checkpoint `wavtokenizer_large_speech_320_24k.ckpt`.
+The similarly named medium checkpoint is not a drop-in replacement: speaker
+profiles must be encoded with the same large checkpoint used for decoding.
+Download that checkpoint and config from the official WavTokenizer repositories
+into `models/wavtokenizer/`, then set `WAVTOKENIZER_ROOT`,
 `WAVTOKENIZER_CONFIG_PATH`, and `WAVTOKENIZER_CHECKPOINT_PATH` (see
 `.env.example`). Set the YarnGPT2 variables there as well. Its model weights
 download from Hugging Face on first use unless `YARNGPT2_LOCAL_FILES_ONLY=true`.
@@ -122,8 +127,9 @@ this project's YarnGPT2 adapter. Underdog Bark is selectable as the separate
 speech recognition model with `--stt-model underdog`.
 
 The echo loop does not use an LLM. `llm_loop.py` is a separate optional demo.
-YarnGPT2 generates a full utterance before playback; its sentence chunking is
-emulated, not true token streaming. The upstream project is source-based and documents an older
+YarnGPT2 runs on CPU here and can take many seconds per sentence. It generates
+a full sentence before playback; its sentence chunking is emulated, not true
+token streaming. For responsive conversations, use Kokoro. The upstream project is source-based and documents an older
 requirements file; do not install that file wholesale into the voice-lab
 environment because it pins different PyTorch versions. The adapter lazily
 loads the source and records SHA-256 hashes for its local config and checkpoint.
@@ -206,6 +212,26 @@ the Ollama settings in `.env.example`. The first Bark run
 downloads its model weights from Hugging Face. To speak replies with YarnGPT2
 instead, use `--tts-model yarngpt2` and configure the consented local voice
 profile described above. Press Ctrl-C to end the session.
+
+For the browser interface, install the `web` group and run the local server:
+
+```sh
+uv sync --group speech --group tts --group live --group underdog --group web --locked
+uv run python scripts/web_demo.py
+```
+
+If you have a private `.env` in `voice-lab/`, the launcher reads its
+`KEY=value` settings automatically. Open
+[http://127.0.0.1:8765](http://127.0.0.1:8765). Allow microphone access,
+choose Bark or Whisper for listening and Kokoro or an authorized YarnGPT2
+profile for the speaking voice, then tap **Start talking** and tap **Finish and
+send** when you are done, or pause for 1.5 seconds to send automatically. The
+assistant text and audio stream sentence by sentence as Ollama generates them,
+so playback begins before the full reply is complete. The page and model API bind to localhost; the browser
+transmits audio only to this local server. Ollama must be running with the
+configured model installed. Whisper Tiny is the fast CPU option; Whisper Small
+can be selected when accuracy matters more than response time. Replies play
+automatically and keep a **Hear reply** button in case the browser blocks audio.
 
 STT benchmarks require a consented manifest with a `consent_id` for each clip,
 hand-corrected reference text, and private audio named `{clip_id}.wav`. They

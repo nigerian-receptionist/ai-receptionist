@@ -38,6 +38,10 @@ live = [
   "silero-vad>=6.2.3,<7",
   "sounddevice>=0.5.2,<1",
 ]
+web = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.34,<1",
+]
 
 [build-system]
 requires = ["hatchling==1.27.0"]

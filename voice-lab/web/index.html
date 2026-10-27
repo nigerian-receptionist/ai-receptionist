@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f2eee5">
+  <title>Voice Lab — talk, listen, compare</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f2eee5;
+      --card: #fbf9f4;
+      --ink: #22251f;
+      --muted: #73776c;
+      --line: #d9d4c8;
+      --moss: #52624b;
+      --moss-dark: #394936;
+      --orange: #d4673e;
+      --soft-orange: #f2dfd4;
+      --serif: Georgia, "Times New Roman", serif;
+      --sans: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+      font-family: var(--sans);
+      background: var(--paper);
+      color: var(--ink);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--paper); }
+    button, select { font: inherit; }
+    button:focus-visible, select:focus-visible, a:focus-visible {
+      outline: 3px solid var(--orange); outline-offset: 3px;
+    }
+    .shell { max-width: 1240px; margin: 0 auto; padding: 24px 36px 48px; }
+    header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 4px 0 20px; }
+    .brand { display: flex; align-items: center; gap: 12px; font-size: 13px; font-weight: 750; letter-spacing: .11em; text-transform: uppercase; }
+    .brand-mark { width: 30px; height: 30px; display: grid; place-items: center; color: var(--card); background: var(--moss); border-radius: 50%; font: 18px var(--serif); }
+    .local-status { color: var(--muted); font-size: 12px; letter-spacing: .04em; display: flex; align-items: center; gap: 8px; }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #aaa; }
+    .status-dot.ready { background: #638b58; box-shadow: 0 0 0 4px #638b5822; }
+    .status-dot.error { background: var(--orange); }
+    .intro { padding: 50px 0 34px; display: grid; grid-template-columns: 1fr 220px; gap: 30px; align-items: end; }
+    .eyebrow { color: var(--moss); font-size: 11px; letter-spacing: .17em; text-transform: uppercase; font-weight: 800; }
+    h1 { margin: 10px 0 10px; max-width: 660px; font: 400 clamp(38px, 5vw, 62px)/1.02 var(--serif); letter-spacing: -.045em; }
+    .intro p { color: var(--muted); max-width: 550px; margin: 0; font-size: 15px; line-height: 1.6; }
+    .signal-art { justify-self: end; display: flex; align-items: center; justify-content: center; gap: 5px; height: 80px; width: 190px; border-bottom: 1px solid var(--line); }
+    .signal-art i { display: block; width: 3px; border-radius: 3px; background: var(--orange); opacity: .78; }
+    .signal-art i:nth-child(8n+1) { height: 13px } .signal-art i:nth-child(8n+2) { height: 26px }
+    .signal-art i:nth-child(8n+3) { height: 18px } .signal-art i:nth-child(8n+4) { height: 44px }
+    .signal-art i:nth-child(8n+5) { height: 29px } .signal-art i:nth-child(8n+6) { height: 57px }
+    .signal-art i:nth-child(8n+7) { height: 22px } .signal-art i:nth-child(8n) { height: 36px }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(290px, .8fr); align-items: start; gap: 22px; }
+    .conversation, .controls { background: var(--card); border: 1px solid var(--line); }
+    .conversation { min-height: 520px; display: flex; flex-direction: column; }
+    .panel-head { height: 62px; border-bottom: 1px solid var(--line); padding: 0 22px; display: flex; align-items: center; justify-content: space-between; }
+    .panel-title { font-size: 12px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+    .session-label { color: var(--muted); font-size: 11px; }
+    .messages { padding: 22px; flex: 1; display: flex; flex-direction: column; gap: 18px; overflow-y: auto; max-height: 470px; }
+    .empty-state { margin: auto; max-width: 300px; text-align: center; color: var(--muted); }
+    .empty-orbit { width: 64px; height: 64px; margin: 0 auto 18px; display: grid; place-items: center; border: 1px solid #b9c0b2; border-radius: 50%; color: var(--moss); font: 26px var(--serif); }
+    .empty-state strong { display: block; color: var(--ink); font: 24px var(--serif); font-weight: 400; margin-bottom: 8px; }
+    .empty-state span { font-size: 13px; line-height: 1.5; }
+    .message { max-width: 84%; line-height: 1.55; font-size: 14px; white-space: pre-wrap; }
+    .message.user { align-self: flex-end; background: #e9e5da; padding: 12px 15px; border-radius: 14px 14px 3px 14px; }
+    .message.assistant { align-self: flex-start; padding: 2px 4px; }
+    .message-label { display: block; color: var(--muted); font-size: 10px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 5px; }
+    .voice-replay { display: inline-flex; align-items: center; gap: 7px; margin-top: 10px; border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--moss-dark); padding: 7px 10px; font-size: 11px; font-weight: 700; cursor: pointer; }
+    .voice-replay:hover { background: #e9e5da; }
+    .composer { border-top: 1px solid var(--line); padding: 16px 20px 18px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .composer-note { color: var(--muted); font-size: 12px; }
+    .mic-feedback { display: flex; align-items: center; gap: 9px; min-width: 140px; color: var(--muted); font-size: 11px; }
+    .mic-led { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: #aaa; }
+    .mic-feedback.active { color: var(--moss-dark); }
+    .mic-feedback.active .mic-led { background: #5b9653; box-shadow: 0 0 0 4px #5b965322; }
+    .mic-meter { display: flex; align-items: center; gap: 2px; height: 22px; }
+    .mic-meter i { width: 2px; height: 3px; border-radius: 2px; background: #78906d; transition: height 70ms linear; }
+    .mic-feedback.active .mic-meter i { background: var(--moss); }
+    .talk-button { appearance: none; border: 0; cursor: pointer; display: inline-flex; align-items: center; gap: 10px; color: white; background: var(--moss-dark); padding: 13px 19px; font-weight: 700; font-size: 13px; border-radius: 3px; transition: background .18s, transform .18s; }
+    .talk-button:hover { background: var(--moss); transform: translateY(-1px); }
+    .talk-button.recording { background: var(--orange); }
+    .talk-button:disabled { cursor: wait; opacity: .65; transform: none; }
+    .mic-icon { width: 14px; height: 14px; border: 2px solid currentColor; border-radius: 8px; position: relative; }
+    .mic-icon::after { content: ""; position: absolute; width: 7px; height: 5px; border: 1px solid currentColor; border-top: 0; border-radius: 0 0 7px 7px; left: 1.5px; bottom: -5px; }
+    .controls { padding: 23px; }
+    .controls h2 { font: 26px var(--serif); font-weight: 400; margin: 0 0 4px; }
+    .controls-intro { font-size: 12px; color: var(--muted); margin: 0 0 24px; line-height: 1.5; }
+    .field { margin: 0 0 22px; }
+    .field label { display: block; color: var(--muted); font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .13em; margin-bottom: 9px; }
+    .select-wrap { position: relative; }
+    select { width: 100%; appearance: none; background: transparent; border: 1px solid var(--line); color: var(--ink); border-radius: 2px; padding: 12px 36px 12px 12px; font-size: 13px; cursor: pointer; }
+    .select-wrap::after { content: "⌄"; position: absolute; right: 12px; top: 8px; pointer-events: none; font-size: 18px; color: var(--moss); }
+    .choice-detail { color: var(--muted); font-size: 11px; line-height: 1.45; margin: 8px 0 0; }
+    .rule { border: 0; border-top: 1px solid var(--line); margin: 23px 0; }
+    .privacy-note { color: var(--muted); font-size: 11px; line-height: 1.55; display: flex; gap: 9px; }
+    .privacy-note b { color: var(--moss); }
+    .alert { display: none; color: #8b3f27; background: var(--soft-orange); padding: 11px 13px; font-size: 12px; line-height: 1.45; margin-top: 16px; }
+    .alert.show { display: block; }
+    .typing { color: var(--muted); font-size: 13px; font-style: italic; }
+    @media (max-width: 760px) {
+      .shell { padding: 18px 17px 30px; }
+      .intro { grid-template-columns: 1fr; padding: 37px 0 24px; }
+      .signal-art { display: none; }
+      .workspace { grid-template-columns: 1fr; }
+      .conversation { min-height: 430px; }
+      .messages { max-height: 52vh; min-height: 250px; }
+      .controls { order: -1; padding: 19px; }
+      .controls h2 { font-size: 23px; }
+      .controls-intro { margin-bottom: 15px; }
+      .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+      .field { margin-bottom: 10px; }
+      .rule, .privacy-note { display: none; }
+      .message { max-width: 94%; }
+      .composer { padding: 14px; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="brand"><span class="brand-mark">v</span> Voice Lab</div>
+      <div class="local-status"><span class="status-dot" id="statusDot"></span><span id="statusText">Checking Ollama…</span></div>
+    </header>
+    <section class="intro" aria-labelledby="pageTitle">
+      <div>
+        <div class="eyebrow">A local voice conversation</div>
+        <h1 id="pageTitle">Say what’s on your mind.</h1>
+        <p>Speak naturally. Your assistant listens, thinks on this computer, and answers out loud.</p>
+      </div>
+      <div class="signal-art" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    </section>
+    <section class="workspace">
+      <article class="conversation" aria-label="Conversation">
+        <div class="panel-head"><span class="panel-title">Conversation</span><span class="session-label" id="sessionLabel">Ready when you are</span></div>
+        <div class="messages" id="messages" aria-live="polite">
+          <div class="empty-state" id="emptyState"><div class="empty-orbit">◖</div><strong>Start with a hello.</strong><span>Tap the button, say a few words, then tap it again to send.</span></div>
+        </div>
+        <div class="composer"><div><div class="mic-feedback" id="micFeedback" role="status" aria-live="polite"><span class="mic-led"></span><span id="micReadout">Microphone off</span><span class="mic-meter" id="micMeter" aria-hidden="true"></span></div><span class="composer-note" id="composerNote">Microphone access is needed to talk.</span></div><button class="talk-button" id="talkButton" type="button"><span class="mic-icon" aria-hidden="true"></span><span id="talkLabel">Start talking</span></button></div>
+      </article>
+      <aside class="controls" aria-label="Conversation settings">
+        <h2>Choose your voice</h2>
+        <p class="controls-intro">Switch the speech model any time. Your choice applies to the next reply.</p>
+        <div class="controls-grid">
+          <div class="field"><label for="sttSelect">Listening</label><div class="select-wrap"><select id="sttSelect"><option value="stt_fw_tiny">Whisper Tiny · faster</option><option value="stt_fw_small">Whisper Small · more accurate</option><option value="stt_underdog_bark">Underdog Bark</option></select></div><p class="choice-detail" id="sttDetail">Whisper Tiny · faster local speech recognition.</p></div>
+          <div class="field"><label for="ttsSelect">Speaking</label><div class="select-wrap"><select id="ttsSelect"><option value="tts_kokoro">Kokoro</option><option value="tts_yarngpt2">YarnGPT2</option></select></div><p class="choice-detail" id="ttsDetail">Kokoro · choose a voice below.</p></div>
+        </div>
+        <div class="field" id="voiceField"><label for="voiceSelect">Voice</label><div class="select-wrap"><select id="voiceSelect"><option value="af_sarah">Sarah · warm</option><option value="af_nicole">Nicole · clear</option><option value="af_bella">Bella · bright</option><option value="af_sky">Sky · light</option></select></div><p class="choice-detail" id="voiceDetail">English voice · local synthesis.</p></div>
+        <hr class="rule">
+        <div class="privacy-note"><b>●</b><span>Audio and replies stay in this local app. Transcripts appear here only for this session.</span></div>
+        <div class="alert" id="alertBox" role="alert"></div>
+      </aside>
+    </section>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const messages = $('messages');
+    const history = [];
+    let stream = null, context = null, processor = null, source = null, mute = null, chunks = [], recording = false, busy = false;
+    let silenceSeconds = 0, recordingSeconds = 0, speechDetected = false;
+    for (let i = 0; i < 16; i++) $('micMeter').append(document.createElement('i'));
+    function updateMicLevel(level) {
+      const bars = $('micMeter').children;
+      for (let i = 0; i < bars.length; i++) {
+        const envelope = Math.max(0, 1 - Math.abs(i - 7.5) / 9);
+        const texture = .24 + .76 * Math.abs(Math.sin(i * 1.7 + level * 13));
+        bars[i].style.height = `${Math.max(3, 3 + level * envelope * texture * 19)}px`;
+      }
+    }
+    function micState(active, message) {
+      $('micFeedback').classList.toggle('active', active);
+      $('micReadout').textContent = message;
+      if (!active) updateMicLevel(0);
+    }
+
+    function setStatus(ready, text) {
+      $('statusDot').className = `status-dot ${ready ? 'ready' : 'error'}`;
+      $('statusText').textContent = text;
+    }
+    function alert(message) { $('alertBox').textContent = message; $('alertBox').classList.add('show'); }
+    function clearAlert() { $('alertBox').textContent = ''; $('alertBox').classList.remove('show'); }
+    function addMessage(role, text) {
+      $('emptyState')?.remove();
+      const item = document.createElement('div');
+      item.className = `message ${role}`;
+      const label = document.createElement('span'); label.className = 'message-label'; label.textContent = role === 'user' ? 'You' : 'Assistant';
+      const body = document.createElement('span'); body.textContent = text;
+      item.append(label, body); messages.append(item); messages.scrollTop = messages.scrollHeight;
+      return item;
+    }
+    function pcmWav(floatSamples, sampleRate) {
+      const buffer = new ArrayBuffer(44 + floatSamples.length * 2), view = new DataView(buffer);
+      const write = (offset, value) => { for (let i=0; i<value.length; i++) view.setUint8(offset+i, value.charCodeAt(i)); };
+      write(0, 'RIFF'); view.setUint32(4, 36 + floatSamples.length * 2, true); write(8, 'WAVE');
+      write(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+      write(36, 'data'); view.setUint32(40, floatSamples.length * 2, true);
+      let offset = 44;
+      for (const sample of floatSamples) { const value = Math.max(-1, Math.min(1, sample)); view.setInt16(offset, value < 0 ? value * 32768 : value * 32767, true); offset += 2; }
+      let binary = ''; const bytes = new Uint8Array(buffer); for (let i=0; i<bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+      return btoa(binary);
+    }
+    function playAudioBlob(blob) {
+      return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(blob), playback = new Audio(url);
+        let settled = false;
+        const finish = (error) => {
+          if (settled) return;
+          settled = true; URL.revokeObjectURL(url);
+          if (error) reject(error); else resolve();
+        };
+        playback.onended = () => finish();
+        playback.onerror = () => finish(new Error('Audio playback failed'));
+        playback.play().catch(finish);
+      });
+    }
+    async function startRecording() {
+      clearAlert();
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}});
+        context = new AudioContext(); source = context.createMediaStreamSource(stream);
+        processor = context.createScriptProcessor(4096, 1, 1); mute = context.createGain(); mute.gain.value = 0; chunks = [];
+        silenceSeconds = 0; recordingSeconds = 0; speechDetected = false;
+        processor.onaudioprocess = (event) => {
+          const samples = new Float32Array(event.inputBuffer.getChannelData(0)); chunks.push(samples);
+          let energy = 0; for (const sample of samples) energy += sample * sample;
+          const rms = Math.sqrt(energy / samples.length);
+          const level = Math.min(1, rms * 9);
+          updateMicLevel(level);
+          const seconds = samples.length / context.sampleRate;
+          recordingSeconds += seconds;
+          if (rms >= 0.012) { speechDetected = true; silenceSeconds = 0; }
+          else if (speechDetected) silenceSeconds += seconds;
+          if (recording && speechDetected && (silenceSeconds >= 1.5 || recordingSeconds >= 55)) {
+            busy = true;
+            void stopRecording();
+          }
+        };
+        source.connect(processor); processor.connect(mute); mute.connect(context.destination);
+        recording = true; micState(true, 'Microphone on · level moves with your voice'); $('talkButton').classList.add('recording'); $('talkLabel').textContent = 'Finish and send'; $('sessionLabel').textContent = 'Listening to you'; $('composerNote').textContent = 'Speak naturally; I will send after a short pause, or tap “Finish and send”.';
+      } catch (error) { alert(`Microphone unavailable: ${error.message}. Allow microphone access for this page and try again.`); }
+    }
+    async function stopRecording() {
+      recording = false; $('talkButton').classList.remove('recording'); $('talkButton').disabled = true; $('talkLabel').textContent = 'Thinking…'; $('sessionLabel').textContent = 'Working on your reply'; $('composerNote').textContent = 'Transcribing, thinking, and preparing speech…';
+      const sampleRate = context.sampleRate;
+      source?.disconnect(); processor?.disconnect(); mute?.disconnect(); stream?.getTracks().forEach(track => track.stop()); await context?.close();
+      micState(false, 'Microphone off');
+      const length = chunks.reduce((sum, part) => sum + part.length, 0);
+      if (!length) { busy = false; $('talkButton').disabled = false; $('talkLabel').textContent = 'Start talking'; alert('No audio was captured. Try again.'); return; }
+      const samples = new Float32Array(length); let cursor = 0; for (const chunk of chunks) { samples.set(chunk, cursor); cursor += chunk.length; }
+      await sendTurn(pcmWav(samples, sampleRate), sampleRate);
+    }
+    async function sendTurn(audio, sampleRate) {
+      const voiceId = $('voiceSelect').value;
+      const pending = document.createElement('div'); pending.className = 'typing'; pending.textContent = 'Listening…'; messages.append(pending); messages.scrollTop = messages.scrollHeight;
+      let transcript = '', assistantText = null, assistantMessage = null, finalReply = '';
+      const replyAudio = [];
+      let playbackFailed = false;
+      let playbackChain = Promise.resolve();
+      const queueAudio = (blob) => {
+        replyAudio.push(blob);
+        playbackChain = playbackChain.then(() => {
+          $('sessionLabel').textContent = 'Speaking your reply';
+          return playAudioBlob(blob);
+        }).catch(() => { playbackFailed = true; });
+      };
+      const addReplayButton = () => {
+        if (!assistantMessage || !replyAudio.length || assistantMessage.querySelector('.voice-replay')) return;
+        const replay = document.createElement('button'); replay.className = 'voice-replay'; replay.type = 'button'; replay.textContent = '▶ Hear reply';
+        replay.addEventListener('click', async () => {
+          $('sessionLabel').textContent = 'Playing your reply';
+          try {
+            for (const blob of replyAudio) await playAudioBlob(blob);
+            $('sessionLabel').textContent = 'Ready for another turn';
+          } catch { $('sessionLabel').textContent = 'Audio could not play · check your device volume'; }
+        });
+        assistantMessage.append(replay);
+      };
+      const handleEvent = (event) => {
+        if (event.type === 'transcript') {
+          transcript = event.transcript;
+          pending.textContent = 'Assistant is thinking…';
+          addMessage('user', transcript);
+          assistantMessage = addMessage('assistant', '');
+          assistantText = assistantMessage.lastElementChild;
+        } else if (event.type === 'text') {
+          if (assistantText) assistantText.textContent += `${assistantText.textContent ? ' ' : ''}${event.text}`;
+          messages.scrollTop = messages.scrollHeight;
+        } else if (event.type === 'audio') {
+          const binary = atob(event.audio_wav_base64), bytes = new Uint8Array(binary.length);
+          for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+          queueAudio(new Blob([bytes], {type: 'audio/wav'}));
+        } else if (event.type === 'done') {
+          finalReply = event.reply || assistantText?.textContent || '';
+          history.push({role: 'user', content: transcript}, {role: 'assistant', content: finalReply});
+          if (history.length > 12) history.splice(0, history.length - 12);
+          pending.remove(); addReplayButton();
+          $('sessionLabel').textContent = `Reply streaming · first audio ${event.timings?.first_audio_seconds ?? '—'}s`;
+        } else if (event.type === 'error') {
+          throw new Error(event.message || 'The turn could not be completed.');
+        }
+      };
+      try {
+        const response = await fetch('/api/turn/stream', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({audio_wav_base64: audio, sample_rate: sampleRate, stt_model: $('sttSelect').value, tts_model: $('ttsSelect').value, voice_id: voiceId, history})});
+        if (!response.ok) {
+          const data = await response.json();
+          throw new Error(data.detail || 'The turn could not be completed.');
+        }
+        if (!response.body) throw new Error('This browser cannot stream the assistant response.');
+        const reader = response.body.getReader(), decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const {value, done} = await reader.read();
+          buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+          let newline;
+          while ((newline = buffer.indexOf('\n')) >= 0) {
+            const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
+            if (line) handleEvent(JSON.parse(line));
+          }
+          if (done) break;
+        }
+        if (buffer.trim()) handleEvent(JSON.parse(buffer));
+        await playbackChain;
+        addReplayButton();
+        if (playbackFailed) $('sessionLabel').textContent = 'Reply ready · tap “Hear reply” to play it';
+        else if (replyAudio.length) $('sessionLabel').textContent = 'Ready for another turn';
+        else throw new Error(finalReply ? 'The assistant reply had no audio.' : 'The assistant did not return a reply.');
+      } catch (error) { pending.remove(); addReplayButton(); alert(error.message); $('sessionLabel').textContent = 'Ready for another turn'; }
+      finally { busy = false; $('talkButton').disabled = false; $('talkLabel').textContent = 'Start talking'; $('composerNote').textContent = 'Tap to record a message.'; }
+    }
+    $('talkButton').addEventListener('click', async () => { if (busy) return; if (recording) { busy = true; await stopRecording(); } else await startRecording(); });
+    $('ttsSelect').addEventListener('change', () => {
+      const yarn = $('ttsSelect').value === 'tts_yarngpt2';
+      $('ttsDetail').textContent = yarn
+        ? 'YarnGPT2 · experimental and slow on this CPU; use Kokoro for faster live replies. Only your authorized local voices are listed.'
+        : 'Kokoro · choose a voice below.';
+      $('voiceDetail').textContent = yarn
+        ? `Your authorized local voices: ${yarnVoices.join(', ') || 'none found'}.`
+        : 'English voice · local synthesis.';
+      $('voiceSelect').replaceChildren();
+      if (yarn) {
+        if (!yarnVoices.length) {
+          const option = document.createElement('option'); option.value = ''; option.textContent = 'No authorized profile found'; $('voiceSelect').append(option);
+        } else {
+          for (const id of yarnVoices) {
+            const option = document.createElement('option'); option.value = id;
+            const name = id.replaceAll('_', ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+            option.textContent = `${name} · authorized voice`; $('voiceSelect').append(option);
+          }
+        }
+      } else {
+        for (const [id, label] of kokoroVoices) { const option = document.createElement('option'); option.value = id; option.textContent = label; $('voiceSelect').append(option); }
+      }
+    });
+    $('sttSelect').addEventListener('change', () => {
+      const labels = {
+        stt_underdog_bark: 'Underdog Bark · English-only local recognition.',
+        stt_fw_tiny: 'Whisper Tiny · faster local recognition; may miss more words.',
+        stt_fw_small: 'Whisper Small · more accurate, but slower on this CPU.'
+      };
+      $('sttDetail').textContent = labels[$('sttSelect').value];
+    });
+    const kokoroVoices = [['af_sarah', 'Sarah · warm'], ['af_nicole', 'Nicole · clear'], ['af_bella', 'Bella · bright'], ['af_sky', 'Sky · light']];
+    let yarnVoices = [];
+    async function initialize() {
+      try {
+        const response = await fetch('/api/status'); const data = await response.json();
+        for (const [id, ready] of Object.entries(data.stt_ready)) {
+          const option = $('sttSelect').querySelector(`option[value="${id}"]`);
+          option.disabled = !ready;
+          if (!ready && id === 'stt_fw_tiny') option.textContent = 'Whisper Tiny · checkpoint missing';
+          if (ready && id === 'stt_fw_tiny') option.textContent = 'Whisper Tiny · faster';
+          if (!ready && id === 'stt_underdog_bark') option.textContent = 'Underdog Bark · model not downloaded';
+          if (ready && id === 'stt_underdog_bark') option.textContent = 'Underdog Bark';
+        }
+        for (const [id, ready] of Object.entries(data.tts_ready)) {
+          const option = $('ttsSelect').querySelector(`option[value="${id}"]`);
+          option.disabled = !ready;
+          if (!ready && id === 'tts_yarngpt2') option.textContent = 'YarnGPT2 · local assets missing';
+          if (ready && id === 'tts_yarngpt2') option.textContent = 'YarnGPT2';
+        }
+        if (!data.stt_ready[$('sttSelect').value]) {
+          $('sttSelect').value = data.stt_ready.stt_fw_tiny ? 'stt_fw_tiny' : 'stt_fw_small';
+        }
+        if (!data.tts_ready[$('ttsSelect').value]) $('ttsSelect').value = 'tts_kokoro';
+        if (!data.stt_ready.stt_underdog_bark) {
+          $('sttDetail').textContent = `${data.model_reasons.stt_underdog_bark} Whisper is ready to use.`;
+        }
+        if (!data.tts_ready.tts_yarngpt2) {
+          $('ttsDetail').textContent = `${data.model_reasons.tts_yarngpt2} Kokoro is ready to use.`;
+        }
+        if (data.ollama_ready) setStatus(true, `Ollama ready · ${data.ollama_model}`);
+        else { setStatus(false, `Ollama model missing · ${data.ollama_model}`); alert('Ollama is running but its configured model is not ready. In a terminal, run: ollama pull ' + data.ollama_model.replace('ollama/', '')); }
+        yarnVoices = data.yarn_voices;
+        $('sttSelect').dispatchEvent(new Event('change'));
+        $('ttsSelect').dispatchEvent(new Event('change'));
+      } catch { setStatus(false, 'Local voice server unavailable'); alert('Start the Voice Lab web server from voice-lab/ to use this page.'); }
+    }
+    initialize();
+  </script>
+</body>
+</html>

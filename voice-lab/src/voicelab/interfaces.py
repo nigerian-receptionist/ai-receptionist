@@ -36,7 +36,12 @@ class SpeechToText(Protocol):
     model_id: str
 
     def transcribe_file(
-        self, path: str, *, language: str | None = None, hints: list[str] | None = None
+        self,
+        path: str,
+        *,
+        language: str | None = None,
+        hints: list[str] | None = None,
+        word_timestamps: bool = False,
     ) -> SttResult: ...
 
     def transcribe_stream(
