@@ -351,7 +351,7 @@
     });
     $('sttSelect').addEventListener('change', () => {
       const labels = {
-        stt_underdog_bark: 'Underdog Bark · English-only local recognition.',
+        stt_underdog_bark: 'Underdog Bark · slower on CPU; choose Whisper Tiny for quicker turns.',
         stt_fw_tiny: 'Whisper Tiny · faster local recognition; may miss more words.',
         stt_fw_small: 'Whisper Small · more accurate, but slower on this CPU.'
       };
@@ -368,7 +368,7 @@
           if (!ready && id === 'stt_fw_tiny') option.textContent = 'Whisper Tiny · checkpoint missing';
           if (ready && id === 'stt_fw_tiny') option.textContent = 'Whisper Tiny · faster';
           if (!ready && id === 'stt_underdog_bark') option.textContent = 'Underdog Bark · model not downloaded';
-          if (ready && id === 'stt_underdog_bark') option.textContent = 'Underdog Bark';
+          if (ready && id === 'stt_underdog_bark') option.textContent = 'Underdog Bark · slower on CPU';
         }
         for (const [id, ready] of Object.entries(data.tts_ready)) {
           const option = $('ttsSelect').querySelector(`option[value="${id}"]`);

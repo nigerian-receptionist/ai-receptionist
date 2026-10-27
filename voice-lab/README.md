@@ -175,10 +175,16 @@ Underdog Bark 3.0 is an optional, local English speech-to-text model, not a
 speech generator. Install its runtime with `uv sync --group speech --group
 live --group underdog --locked`, then start either microphone demo with
 `--stt-model underdog` to use Bark instead of Whisper, for example:
-`python scripts/echo_loop.py --tts-model kokoro --stt-model underdog`. The model
-downloads from Hugging Face on first use; set
-`UNDERDOG_BARK_LOCAL_FILES_ONLY=true` to require a pre-cached copy. Bark does
-not provide word timings or language support beyond English. Its CC-BY-4.0
+`python scripts/echo_loop.py --tts-model kokoro --stt-model underdog`. Download
+the model and its small Parakeet processor/config files before running offline:
+
+```sh
+uv run python scripts/download_underdog_assets.py
+```
+
+Then set `UNDERDOG_BARK_LOCAL_FILES_ONLY=true` to prevent runtime network
+requests. Bark does not provide word timings or language support beyond
+English. Its CC-BY-4.0
 attribution is recorded in [`licences.md`](licences.md).
 
 ## Talk to the demo
@@ -223,9 +229,10 @@ uv run python scripts/web_demo.py
 If you have a private `.env` in `voice-lab/`, the launcher reads its
 `KEY=value` settings automatically. Open
 [http://127.0.0.1:8765](http://127.0.0.1:8765). Allow microphone access,
-choose Bark or Whisper for listening and Kokoro or an authorized YarnGPT2
-profile for the speaking voice, then tap **Start talking** and tap **Finish and
-send** when you are done, or pause for 1.5 seconds to send automatically. The
+choose Whisper Tiny for faster CPU listening or Bark for English recognition
+with higher latency, and Kokoro for faster spoken replies. YarnGPT2 can use an
+authorized local profile for voice experiments. Tap **Start talking** and tap
+**Finish and send** when you are done, or pause for 1.5 seconds to send automatically. The
 assistant text and audio stream sentence by sentence as Ollama generates them,
 so playback begins before the full reply is complete. The page and model API bind to localhost; the browser
 transmits audio only to this local server. Ollama must be running with the
