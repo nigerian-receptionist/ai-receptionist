@@ -76,8 +76,11 @@ class UnderdogBarkAdapter:
         *,
         language: str | None = None,
         hints: list[str] | None = None,
+        word_timestamps: bool = False,
     ) -> SttResult:
-        del hints
+        # Bark returns a transcript without aligned words; accept the shared
+        # option used by Whisper callers so adapter selection stays compatible.
+        del hints, word_timestamps
         if language not in {None, "en", "en-NG", "en-US", "english"}:
             raise ValueError("Underdog Bark 3.0 currently supports English only")
         input_path = Path(path)
