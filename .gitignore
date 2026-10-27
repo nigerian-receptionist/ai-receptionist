@@ -25,3 +25,7 @@ voice-lab/data/models/
 .DS_Store
 .idea/
 .vscode/
+
+.env
+.env.*
+!.env.example

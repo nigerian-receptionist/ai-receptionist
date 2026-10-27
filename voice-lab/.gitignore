@@ -8,3 +8,49 @@ data/models/
 *.ckpt
 *.pt
 *.pth
+.env
+   # Python environments
+   .venv/
+   venv/
+   *-env/
+   __pycache__/
+   *.pyc
+
+   # Secrets
+   .env
+   .env.*
+   !.env.example
+
+   # Voice lab data, models and outputs
+   voice-lab/data/
+   voice-lab/outputs/
+   voice-lab/models/
+   *.wav
+   *.mp3
+   *.m4a
+   *.flac
+   *.ogg
+   *.pt
+   *.ckpt
+   *.safetensors
+   *.onnx
+# Python environments
+.venv/
+venv/
+*-env/
+__pycache__/
+*.pyc
+
+# Voice lab data and outputs (real voices, never commit)
+data/
+outputs/
+models/
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
