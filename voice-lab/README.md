@@ -83,6 +83,24 @@ documented permission for AI speech generation. Do not use upstream preset
 profiles: their likeness rights are not cleared here. The profile directory is
 ignored under `models/` and must not be committed.
 
+To build a profile from a corrected WhisperX result and its matching mono 24 kHz
+PCM16 WAV, save a private consent record containing the matching `consent_id`
+and `voice_use_authorized: true`, then run:
+
+```sh
+python scripts/build_yarngpt2_profile.py \
+  --audio models/yarngpt2/reference_24k.wav \
+  --alignment outputs/Voice-ai-corrected.json \
+  --voice-id my_consented_voice \
+  --consent-id your-private-consent-id \
+  --consent-record models/yarngpt2/consent-record.json
+```
+
+The script encodes the full reference once and slices the resulting code frames
+by each corrected top-level `word_segments` time span. Keep the consent record,
+alignment, WAV, and generated profile local and ignored. Review the transcript
+and timings first; this process does not validate consent or correct alignment.
+
 To synthesize one sentence or start the microphone echo demo, use your profile
 ID as the voice:
 
@@ -90,6 +108,18 @@ ID as the voice:
 python scripts/tts_smoke.py "Hello, how can I help you today?" --model tts_yarngpt2 --voice my_consented_voice --output /tmp/yarn.wav
 TTS_MODEL=tts_yarngpt2 TTS_VOICE=my_consented_voice python scripts/echo_loop.py
 ```
+
+Choose a speech generator each time you start an interactive microphone demo, or
+select one directly with `--tts-model`:
+
+```sh
+python scripts/echo_loop.py --tts-model kokoro
+python scripts/echo_loop.py --tts-model yarngpt2
+```
+
+Kokoro and YarnGPT2 run through the local adapters. “YangGPT” here refers to
+this project's YarnGPT2 adapter. Underdog Bark is selectable as the separate
+speech recognition model with `--stt-model underdog`.
 
 The echo loop does not use an LLM. `llm_loop.py` is a separate optional demo.
 YarnGPT2 generates a full utterance before playback; its sentence chunking is
@@ -134,6 +164,48 @@ The microphone demos need an audio input/output device. The LLM demo defaults
 to a local LiteLLM/Ollama endpoint. Audio is held in memory and temporary WAV
 files are deleted; only redacted timing logs are written. Use headphones to
 reduce speaker-to-microphone echo.
+
+Underdog Bark 3.0 is an optional, local English speech-to-text model, not a
+speech generator. Install its runtime with `uv sync --group speech --group
+live --group underdog --locked`, then start either microphone demo with
+`--stt-model underdog` to use Bark instead of Whisper, for example:
+`python scripts/echo_loop.py --tts-model kokoro --stt-model underdog`. The model
+downloads from Hugging Face on first use; set
+`UNDERDOG_BARK_LOCAL_FILES_ONLY=true` to require a pre-cached copy. Bark does
+not provide word timings or language support beyond English. Its CC-BY-4.0
+attribution is recorded in [`licences.md`](licences.md).
+
+## Talk to the demo
+
+Use `llm_loop.py` for a spoken conversation: it listens through the microphone,
+transcribes each turn with Bark, sends the text to the local Ollama model, and
+speaks the reply with Kokoro. On Ubuntu, install Ollama from its official
+installer and pull the model used by the demo:
+
+```sh
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen2.5:3b
+ollama list
+```
+
+The installer needs your sudo password. If Ollama is not running as a service,
+start `ollama serve` in a separate terminal and leave it running. Then, from
+`voice-lab/`, install the Python groups, download Kokoro's local voice files,
+and start the demo:
+
+```sh
+uv sync --group speech --group tts --group live --group underdog --locked
+uv run python scripts/download_kokoro_assets.py
+export KOKORO_MODEL_PATH=models/kokoro/kokoro-v1.0.onnx
+export KOKORO_VOICES_PATH=models/kokoro/voices-v1.0.bin
+uv run python scripts/llm_loop.py --stt-model underdog --tts-model kokoro
+```
+
+The code defaults to `ollama/qwen2.5:3b` at `http://localhost:11434`; these are
+the Ollama settings in `.env.example`. The first Bark run
+downloads its model weights from Hugging Face. To speak replies with YarnGPT2
+instead, use `--tts-model yarngpt2` and configure the consented local voice
+profile described above. Press Ctrl-C to end the session.
 
 STT benchmarks require a consented manifest with a `consent_id` for each clip,
 hand-corrected reference text, and private audio named `{clip_id}.wav`. They

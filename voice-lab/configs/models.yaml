@@ -18,6 +18,12 @@ stt:
       model: small
       model_sha256: 9ecf779972d90ba49c06d968637d720dd632c55bbf19d441fb42bf17a411e794
       license_status: MIT; verified upstream
+    - id: stt_underdog_bark
+      package: transformers
+      model: ConwayResearch/Underdog-Bark-3.0
+      revision: 85db2ad
+      license_status: CC-BY-4.0; attribution required
+      status: experimental-local-only
     - id: stt_natlas_yo_ig_ha_en
       repo: NCAIR1/{Yoruba-ASR,Igbo-ASR,Hausa-ASR,NigerianAccentedEnglish}
       status: blocked
