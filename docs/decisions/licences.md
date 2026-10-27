@@ -7,6 +7,7 @@ speaker consent.
 | Component | Version / candidate | License | Commercial-use status and notes | Evidence |
 |---|---|---|---|---|
 | OpenAI Whisper | 20250625 | MIT | Allowed local runtime; uses system FFmpeg to decode audio | [Upstream license](https://github.com/openai/whisper/blob/main/LICENSE) |
+| Underdog Bark 3.0 | ConwayResearch/Underdog-Bark-3.0 at `85db2ad` | CC-BY-4.0 | Local English speech recognition only; attribute NVIDIA, Moondream and Conway Research per the model repository's NOTICE. | [Official model card](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0) |
 | WavTokenizer source | Official upstream repository | MIT | Codec adapter only; local source revision must be pinned before benchmark | [Upstream license](https://github.com/jishengpeng/WavTokenizer/blob/main/LICENSE) |
 | WavTokenizer checkpoint | Official `novateur/WavTokenizer` model card | MIT | No exact checkpoint selected yet; pin repository revision and file hash before use | [Official model repository](https://huggingface.co/novateur/WavTokenizer) |
 | torchaudio | Optional codec runtime | BSD | Allowed; CPU wheel is resolved from the PyTorch CPU index | [Upstream setup metadata](https://github.com/pytorch/audio/blob/main/setup.py) |

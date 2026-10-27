@@ -9,6 +9,7 @@ blocked are not loaded by the registry.
 | Candidate | Code / weights | Status | Evidence / reason |
 |---|---|---|---|
 | OpenAI Whisper | MIT runtime; official Whisper weights MIT | Cleared for local evaluation | [Upstream code and model hashes](https://github.com/openai/whisper), [model card](https://github.com/openai/whisper/blob/main/model-card.md) |
+| Underdog Bark 3.0 | CC-BY-4.0 | Local English speech recognition; attribute NVIDIA, Moondream, and Conway Research per the model repository's NOTICE. Not a TTS model. | [Official model card](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0) |
 | faster-whisper | MIT library; same Whisper model family | Not used in this lab | Its PyAV 19 dependency is incompatible with faster-whisper 1.2.1; PyAV binary-wheel licensing also needs review under AGENTS section 19. See the [upstream compatibility issue](https://github.com/SYSTRAN/faster-whisper/issues/1589) and [PyAV wheel license discussion](https://github.com/PyAV-Org/PyAV/issues/2270). |
 | N-ATLaS ASR | Custom Open-Source Research and Innovation License; not OSI open source; commercial or large-scale use requires separate agreement | Blocked | [Official NCAIR1 model card](https://huggingface.co/NCAIR1/N-ATLaS) states its terms; conflicts with permissive-only adoption policy |
 | Community Whisper multilingual | Reported Apache-2.0, but exact repo artifact and provenance not verified | Blocked | Verify the selected repository's current model card, exact revision, and data rights first |

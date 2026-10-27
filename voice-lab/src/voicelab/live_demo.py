@@ -112,7 +112,14 @@ def _spoken_prefix(text: str, fraction: float) -> str:
     return " ".join(words[:count])
 
 
-def run_echo_loop(*, include_llm: bool, max_seconds: float = 12.0, barge_in: bool = True) -> None:
+def run_echo_loop(
+    *,
+    include_llm: bool,
+    max_seconds: float = 12.0,
+    barge_in: bool = True,
+    tts_model: str | None = None,
+    stt_model: str = "stt_fw_small",
+) -> None:
     try:
         import sounddevice as sd
         import torch
@@ -122,8 +129,8 @@ def run_echo_loop(*, include_llm: bool, max_seconds: float = 12.0, barge_in: boo
             "Install the `live` dependency group to use the microphone demo"
         ) from error
 
-    stt = create_stt_adapter("stt_fw_small")
-    tts_model = os.getenv("TTS_MODEL", "tts_kokoro")
+    stt = create_stt_adapter(stt_model)
+    tts_model = tts_model or os.getenv("TTS_MODEL", "tts_kokoro")
     tts = create_tts_adapter(tts_model)
     voice = os.getenv("TTS_VOICE", "")
     if not voice and tts_model == "tts_yarngpt2":
@@ -194,6 +201,7 @@ def run_echo_loop(*, include_llm: bool, max_seconds: float = 12.0, barge_in: boo
                     )
                 if not reply:
                     reply = "I did not get a response. Please try once more."
+                print(f"Assistant: {redact_for_storage(reply)}")
                 tts_result = tts.synthesize(reply, voice_id=voice, language=language)
                 tts_first_audio = time.perf_counter()
                 play_start = time.perf_counter()
