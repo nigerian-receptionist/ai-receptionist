@@ -12,18 +12,19 @@ import uvicorn
 def load_local_environment() -> None:
     """Load simple KEY=value entries from the private voice-lab .env if present."""
     env_path = Path(".env")
-    if not env_path.is_file():
-        return
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        entry = line.strip()
-        if not entry or entry.startswith("#") or "=" not in entry:
-            continue
-        key, value = entry.split("=", 1)
-        key, value = key.strip(), value.strip()
-        if value.startswith(("'", '"')) and value[-1:] == value[:1]:
-            value = value[1:-1]
-        if key:
-            os.environ.setdefault(key, value)
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            entry = line.strip()
+            if not entry or entry.startswith("#") or "=" not in entry:
+                continue
+            key, value = entry.split("=", 1)
+            key, value = key.strip(), value.strip()
+            if value.startswith(("'", '"')) and value[-1:] == value[:1]:
+                value = value[1:-1]
+            if key:
+                os.environ.setdefault(key, value)
+    os.environ.setdefault("KOKORO_MODEL_PATH", "models/kokoro/kokoro-v1.0.onnx")
+    os.environ.setdefault("KOKORO_VOICES_PATH", "models/kokoro/voices-v1.0.bin")
 
 
 def main() -> None:

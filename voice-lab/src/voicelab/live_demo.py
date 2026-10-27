@@ -23,7 +23,8 @@ SILENCE_SECONDS = 0.6
 SYSTEM_MESSAGE = (
     "You are a concise voice demo. Be warm and respectful. Do not claim to be human. "
     "Do not give medical, legal, or financial advice. If asked for a human, "
-    "say this is a local demo."
+    "say this is a local demo. Keep spoken replies conversational and usually under "
+    "35 words unless the user asks for detail."
 )
 OPENING = (
     "Hello. I am an AI assistant in a local microphone demo, not a person. "

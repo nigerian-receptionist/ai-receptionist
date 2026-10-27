@@ -8,6 +8,11 @@ stt:
     model_sha256: aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a
     license_status: MIT; verified upstream
   candidates:
+    - id: stt_fw_tiny
+      package: openai-whisper
+      model: tiny
+      model_sha256: 65147644a518d12f04e32d6f3b26facc3f8dd46e5390956a9424a650c0ce22b9
+      license_status: MIT; verified upstream
     - id: stt_fw_large
       package: openai-whisper
       model: large-v3

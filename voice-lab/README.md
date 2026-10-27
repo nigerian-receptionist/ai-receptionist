@@ -219,9 +219,13 @@ If you have a private `.env` in `voice-lab/`, the launcher reads its
 [http://127.0.0.1:8765](http://127.0.0.1:8765). Allow microphone access,
 choose Bark or Whisper for listening and Kokoro or an authorized YarnGPT2
 profile for the speaking voice, then tap **Start talking** and tap **Finish and
-send** when you are done. The page and model API bind to localhost; the browser
+send** when you are done, or pause for 1.5 seconds to send automatically. The
+assistant text and audio stream sentence by sentence as Ollama generates them,
+so playback begins before the full reply is complete. The page and model API bind to localhost; the browser
 transmits audio only to this local server. Ollama must be running with the
-configured model installed.
+configured model installed. Whisper Tiny is the fast CPU option; Whisper Small
+can be selected when accuracy matters more than response time. Replies play
+automatically and keep a **Hear reply** button in case the browser blocks audio.
 
 STT benchmarks require a consented manifest with a `consent_id` for each clip,
 hand-corrected reference text, and private audio named `{clip_id}.wav`. They
