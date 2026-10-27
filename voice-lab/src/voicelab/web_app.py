@@ -111,8 +111,10 @@ def status() -> dict[str, Any]:
         bark_ready = False
     hub_offline = os.getenv("HF_HUB_OFFLINE", "false").lower() in {"1", "true", "yes"}
     bark_reason = (
-        "HF_HUB_OFFLINE is enabled and Bark files are not cached."
-        if hub_offline and not bark_ready
+        ""
+        if bark_ready
+        else "HF_HUB_OFFLINE is enabled and Bark files are not cached."
+        if hub_offline
         else "Bark loader or weights are not cached."
     )
     yarn_voices = _authorized_yarn_voices()
