@@ -207,6 +207,22 @@ downloads its model weights from Hugging Face. To speak replies with YarnGPT2
 instead, use `--tts-model yarngpt2` and configure the consented local voice
 profile described above. Press Ctrl-C to end the session.
 
+For the browser interface, install the `web` group and run the local server:
+
+```sh
+uv sync --group speech --group tts --group live --group underdog --group web --locked
+uv run python scripts/web_demo.py
+```
+
+If you have a private `.env` in `voice-lab/`, the launcher reads its
+`KEY=value` settings automatically. Open
+[http://127.0.0.1:8765](http://127.0.0.1:8765). Allow microphone access,
+choose Bark or Whisper for listening and Kokoro or an authorized YarnGPT2
+profile for the speaking voice, then tap **Start talking** and tap **Finish and
+send** when you are done. The page and model API bind to localhost; the browser
+transmits audio only to this local server. Ollama must be running with the
+configured model installed.
+
 STT benchmarks require a consented manifest with a `consent_id` for each clip,
 hand-corrected reference text, and private audio named `{clip_id}.wav`. They
 run on `dev` by default, report clean and phone-simulated audio separately,
