@@ -64,11 +64,51 @@ class UnderdogBarkAdapter:
         sys.modules[spec.name] = self._loader
         spec.loader.exec_module(self._loader)
         self._model = None
+        self._processor = None
+        self._torch = None
 
     def _load_model(self):
         if self._model is None:
-            self._model = self._loader.load_model(str(self._model_path), device=self.device)
+            import torch
+            from transformers import AutoProcessor
+
+            if self.device == "cpu":
+                torch.set_num_threads(int(os.getenv("UNDERDOG_BARK_CPU_THREADS", "4")))
+            model = self._loader.load_model(str(self._model_path), device=self.device)
+            try:
+                processor = AutoProcessor.from_pretrained(
+                    "nvidia/parakeet-tdt-0.6b-v3", local_files_only=True
+                )
+            except OSError as error:
+                raise RuntimeError(
+                    "Underdog Bark's Parakeet processor files are missing from the local cache. "
+                    "Run scripts/download_underdog_assets.py while online, then restart the app."
+                ) from error
+            self._model = model
+            self._processor = processor
+            self._torch = torch
         return self._model
+
+    def _transcribe_with_cached_processor(
+        self, model, samples: np.ndarray, sample_rate: int
+    ) -> str:
+        if sample_rate != 16000:
+            import soxr
+
+            samples = soxr.resample(samples, sample_rate, 16000)
+        samples = np.concatenate(
+            [np.zeros(int(0.25 * 16000), dtype=np.float32), samples.astype(np.float32)]
+        )
+        processor = self._processor
+        inputs = processor([samples], sampling_rate=16000, return_tensors="pt", padding=True)
+        device, dtype = next(model.parameters()).device, next(model.parameters()).dtype
+        inputs = {
+            key: value.to(device, dtype) if value.dtype.is_floating_point else value.to(device)
+            for key, value in inputs.items()
+        }
+        with self._torch.inference_mode():
+            output = model.generate(**inputs)
+        return processor.batch_decode(output.sequences, skip_special_tokens=True)[0].strip()
 
     def transcribe_file(
         self,
@@ -93,7 +133,7 @@ class UnderdogBarkAdapter:
         samples = samples.astype(np.float32) / 32768.0
         started = time.perf_counter()
         model = self._load_model()
-        transcript = self._loader.transcribe(model, samples, sample_rate)
+        transcript = self._transcribe_with_cached_processor(model, samples, sample_rate)
         latency_s = time.perf_counter() - started
         return SttResult(
             text=transcript.strip(),

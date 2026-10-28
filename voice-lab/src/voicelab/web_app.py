@@ -106,17 +106,23 @@ def status() -> dict[str, Any]:
             revision="85db2ad",
             local_files_only=True,
         )
+        for filename in (
+            "config.json",
+            "generation_config.json",
+            "processor_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ):
+            hf_hub_download(
+                repo_id="nvidia/parakeet-tdt-0.6b-v3",
+                filename=filename,
+                local_files_only=True,
+            )
         bark_ready = True
     except Exception:
         bark_ready = False
     hub_offline = os.getenv("HF_HUB_OFFLINE", "false").lower() in {"1", "true", "yes"}
-    bark_reason = (
-        ""
-        if bark_ready
-        else "HF_HUB_OFFLINE is enabled and Bark files are not cached."
-        if hub_offline
-        else "Bark loader or weights are not cached."
-    )
+    bark_reason = "" if bark_ready else "Bark or its Parakeet processor files are not cached."
     yarn_voices = _authorized_yarn_voices()
     codec_config = Path(
         os.getenv("WAVTOKENIZER_CONFIG_PATH", "models/wavtokenizer/wavtokenizer-config.yaml")
@@ -261,7 +267,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
                     api_base=os.getenv("LITELLM_BASE_URL", "http://localhost:11434"),
                     stream=True,
                     temperature=0.2,
-                    max_tokens=90,
+                    max_tokens=int(os.getenv("ASSISTANT_MAX_TOKENS", "64")),
                 )
                 pending_text = ""
                 full_reply: list[str] = []
