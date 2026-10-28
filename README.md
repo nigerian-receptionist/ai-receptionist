@@ -1,6 +1,7 @@
 # ai-receptionist
 
-Development guidance and repository notes are in [AGENTS.md](AGENTS.md).
+The current active focus is the local speech and conversation demo in
+`voice-lab/`.
 
 ## Voice Lab
 
