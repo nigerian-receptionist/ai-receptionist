@@ -1,7 +1,51 @@
 # ai-receptionist
 
-The current active focus is the local speech and conversation demo in
-`voice-lab/`.
+This repository contains a local AI voice demo and the starter for the platform
+dashboard and API. The platform dashboard currently shows API connectivity and
+clearly marks product areas that are not implemented yet.
+
+## Start the platform frontend and backend
+
+Install [uv](https://docs.astral.sh/uv/), [pnpm](https://pnpm.io/), and Docker
+with Compose. From the repository root, create your local environment file and
+start the supporting services:
+
+```sh
+cp .env.example .env
+docker compose up -d
+```
+
+The container's PostgreSQL port is mapped to `127.0.0.1:5433` so it can run
+alongside a PostgreSQL service already using the usual host port `5432`.
+
+In a second terminal, start the API:
+
+```sh
+uv run --project backend uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
+```
+
+In a third terminal, start the dashboard:
+
+```sh
+cd frontend
+cp .env.example .env.local
+pnpm install
+pnpm dev
+```
+
+Open [http://127.0.0.1:3000](http://127.0.0.1:3000). The API docs are at
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs). The current API only
+provides health and readiness checks; it does not yet store or display contact,
+agent, or call data. The API process check is at `/v1/health`; the dependency
+check at `/v1/ready` verifies PostgreSQL and Valkey connectivity. Tenant data
+models, row-level security policies, and migrations still need to be added.
+This is a local development starter, not a production deployment.
+
+Stop the frontend and API with Ctrl+C, then stop the local data services with:
+
+```sh
+docker compose down
+```
 
 ## Voice Lab
 
