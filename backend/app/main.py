@@ -11,7 +11,9 @@ class Settings(BaseSettings):
     """Runtime settings loaded from environment variables."""
 
     allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
-    database_url: str = "postgresql+asyncpg://ai_receptionist:change-me-local-only@127.0.0.1:5433/ai_receptionist"
+    database_url: str = (
+        "postgresql+asyncpg://ai_receptionist:change-me-local-only@127.0.0.1:5433/ai_receptionist"
+    )
     valkey_url: str = "redis://127.0.0.1:6379/0"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

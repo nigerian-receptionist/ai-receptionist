@@ -171,6 +171,7 @@ Core code imports these protocols, never a model library directly. Put implement
 from dataclasses import dataclass
 from typing import AsyncIterator, Literal, Protocol
 
+
 @dataclass(frozen=True)
 class WordTiming:
     text: str
@@ -178,35 +179,47 @@ class WordTiming:
     end_s: float
     confidence: float | None
 
+
 @dataclass(frozen=True)
 class SttResult:
     text: str
-    language: str                 # en-NG, pcm, yo, ig, ha
+    language: str  # en-NG, pcm, yo, ig, ha
     confidence: float | None
     words: list[WordTiming]
     audio_s: float
     latency_s: float
-    model_id: str                 # for example "stt_fw_turbo@large-v3-turbo"
+    model_id: str  # for example "stt_fw_turbo@large-v3-turbo"
+
 
 @dataclass(frozen=True)
 class SttEvent:
     kind: Literal["partial", "final"]
     result: SttResult
 
+
 class SpeechToText(Protocol):
     model_id: str
-    def transcribe_file(self, path: str, *, language: str | None = None,
-                        hints: list[str] | None = None) -> SttResult: ...
-    def transcribe_stream(self, frames: AsyncIterator[bytes], *, sample_rate: int = 16000,
-                          language: str | None = None,
-                          hints: list[str] | None = None) -> AsyncIterator[SttEvent]: ...
+
+    def transcribe_file(
+        self, path: str, *, language: str | None = None, hints: list[str] | None = None
+    ) -> SttResult: ...
+    def transcribe_stream(
+        self,
+        frames: AsyncIterator[bytes],
+        *,
+        sample_rate: int = 16000,
+        language: str | None = None,
+        hints: list[str] | None = None,
+    ) -> AsyncIterator[SttEvent]: ...
+
 
 @dataclass(frozen=True)
 class VoiceInfo:
     voice_id: str
     language: str
     gender: str
-    tones: list[str]              # supported tones
+    tones: list[str]  # supported tones
+
 
 @dataclass(frozen=True)
 class AudioChunk:
@@ -214,6 +227,7 @@ class AudioChunk:
     sample_rate: int
     is_first: bool
     is_last: bool
+
 
 @dataclass(frozen=True)
 class TtsResult:
@@ -224,15 +238,31 @@ class TtsResult:
     total_latency_s: float
     voice_id: str
     model_id: str
-    text_spoken: str              # after normalisation
+    text_spoken: str  # after normalisation
+
 
 class TextToSpeech(Protocol):
     model_id: str
+
     def voices(self) -> list[VoiceInfo]: ...
-    def synthesize(self, text: str, *, voice_id: str, language: str,
-                   tone: str = "neutral", speed: float = 1.0) -> TtsResult: ...
-    def synthesize_stream(self, text: str, *, voice_id: str, language: str,
-                          tone: str = "neutral", speed: float = 1.0) -> AsyncIterator[AudioChunk]: ...
+    def synthesize(
+        self,
+        text: str,
+        *,
+        voice_id: str,
+        language: str,
+        tone: str = "neutral",
+        speed: float = 1.0,
+    ) -> TtsResult: ...
+    def synthesize_stream(
+        self,
+        text: str,
+        *,
+        voice_id: str,
+        language: str,
+        tone: str = "neutral",
+        speed: float = 1.0,
+    ) -> AsyncIterator[AudioChunk]: ...
 ```
 
 Rules for implementations:
