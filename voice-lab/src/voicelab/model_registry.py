@@ -25,7 +25,9 @@ def create_stt_adapter(model_id: str, config_path: str | Path | None = None):
         raise ValueError(f"Unknown STT model: {model_id}")
     if model_id == "stt_underdog_bark":
         if candidate.get("status") != "experimental-local-only":
-            raise PermissionError("Underdog Bark is available only for local experimental evaluation")
+            raise PermissionError(
+                "Underdog Bark is available only for local experimental evaluation"
+            )
         from voicelab.adapters.stt.underdog_bark import UnderdogBarkAdapter
 
         return UnderdogBarkAdapter()

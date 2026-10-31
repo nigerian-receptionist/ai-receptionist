@@ -64,9 +64,7 @@ def main() -> None:
     parser.add_argument(
         "--consent-record", type=Path, required=True, help="Private JSON permission record"
     )
-    parser.add_argument(
-        "--output-dir", type=Path, default=Path("models/yarngpt2/speakers")
-    )
+    parser.add_argument("--output-dir", type=Path, default=Path("models/yarngpt2/speakers"))
     args = parser.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_-]+", args.voice_id):
         parser.error("--voice-id may contain only letters, digits, '_' and '-'")

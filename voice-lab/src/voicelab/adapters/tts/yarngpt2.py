@@ -62,12 +62,16 @@ class YarnGPT2Adapter:
         self._tokenizer = AutoTokenizer.from_pretrained(
             model_id, revision=revision, local_files_only=local_files_only
         )
-        self._model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            revision=revision,
-            local_files_only=local_files_only,
-            dtype=model_dtype,
-        ).to(self._device).eval()
+        self._model = (
+            AutoModelForCausalLM.from_pretrained(
+                model_id,
+                revision=revision,
+                local_files_only=local_files_only,
+                dtype=model_dtype,
+            )
+            .to(self._device)
+            .eval()
+        )
         self.model_revision = revision
         self._max_new_tokens = max_new_tokens
         self._speakers_dir = Path(
