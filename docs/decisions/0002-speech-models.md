@@ -40,6 +40,13 @@ obligations for any distribution. Keep all raw clips and benchmark rows ignored.
   separate clean and phone-simulated results. Do not tune on the test split.
 - Timing summaries report p50 and p95, with at least 20 measured runs after
   warm-up.
+- Fine-tune tooling now exists: `prepare_finetune_data.py` enforces consent ids
+  and one-speaker-per-split across `train`/`dev`/`test`; `finetune_whisper.py`
+  trains a PEFT LoRA Whisper adapter (Apache-2.0 PEFT, `q_proj`/`v_proj`
+  targets) and can validate data without models via `--dry-run`;
+  `merge_and_convert.py` merges the adapter and runs the documented
+  `ct2-transformers-converter` CLI (MIT CTranslate2). See
+  [`licences.md`](licences.md) for the added dependency rows.
 - YarnGPT2 may be evaluated locally with a private speaker profile backed by
   documented consent. Commercial deployment remains blocked pending data-rights
   and speaker-rights review.

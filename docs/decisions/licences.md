@@ -33,6 +33,9 @@ speaker consent.
 | NVIDIA Parakeet TDT 0.6B v3 | Official model | CC-BY-4.0 | Blocked pending required attribution review | [Model card](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) |
 | YarnGPT2 | `saheedniyi/YarnGPT2` | Apache-2.0 model card; MIT upstream helper | Local experimental evaluation only; commercial deployment pending review of public-media training provenance. Runtime requires a private profile with documented speaker consent. | [Model card](https://huggingface.co/saheedniyi/YarnGPT2), [helper repository](https://github.com/saheedniyi02/yarngpt) |
 | Orpheus / Chatterbox / Piper / Vosk / sherpa models | Exact artifacts not selected | Unknown or artifact-specific | Blocked until exact weights, runtime, and provenance are reviewed | See candidate notes in [`../../voice-lab/licences.md`](../../voice-lab/licences.md) |
+| PEFT | 0.21.x | Apache-2.0 | Allowed for LoRA fine-tuning of MIT-licensed Whisper checkpoints | [PyPI metadata](https://pypi.org/project/peft/) |
+| Accelerate | 1.15.0 (peft dependency, locked) | Apache-2.0 | Transitive of PEFT in the `finetune` group | [PyPI metadata](https://pypi.org/project/accelerate/) |
+| CTranslate2 | 4.8.x | MIT | Allowed as offline Whisper converter (`ct2-transformers-converter`) for the fine-tune path | [PyPI metadata](https://pypi.org/project/ctranslate2/), [upstream source](https://github.com/OpenNMT/CTranslate2) |
 
 The direct live-demo libraries are license-checked. Run an automated license
 scan over all transitive locked dependencies before production adoption.
