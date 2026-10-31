@@ -20,7 +20,8 @@ and round-trip and microphone demo scripts. Candidate status and license notes
 are tracked in `licences.md`; blocked models cannot be loaded through the
 registry.
 
-The `speech`, `tts`, `codec`, `yarngpt2`, and `live` dependency groups are separated so you
+The `speech`, `tts`, `codec`, `yarngpt2`, `live`, `finetune`, and
+`ctranslate2` dependency groups are separated so you
 can install only the parts needed. `uv.lock` pins the resolved versions. Model
 files and the upstream WavTokenizer source checkout stay under ignored
 `models/`.
@@ -40,6 +41,48 @@ python scripts/make_phone_audio.py input.wav --output-dir /tmp/phone-audio
 
 The command writes an 8 kHz mono G.711 mu-law WAV and a 16 kHz mono PCM WAV
 resampled from that phone simulation. `ffmpeg` must be installed separately.
+
+## Fine-tune data and model tooling
+
+The fine-tune flow keeps every consent, split-integrity and redaction rule in
+code (`scripts/prepare_finetune_data.py`, AGENTS.md sections 6.2 and 6.3):
+
+```sh
+# Validate consent ids, required columns and one-speaker-per-split integrity
+python scripts/prepare_finetune_data.py \
+  --manifest data/manifests/nigerian_phone.csv \
+  --audio-dir /srv/private-speech --validate-only
+
+# Build clean 16 kHz examples plus simulated 8 kHz phone-line copies
+python scripts/prepare_finetune_data.py \
+  --manifest data/manifests/nigerian_phone.csv \
+  --audio-dir /srv/private-speech
+
+# Model-free data validation before any training run
+uv run --group finetune python scripts/finetune_whisper.py --dry-run
+```
+
+`scripts/finetune_whisper.py` (without `--dry-run`) trains a PEFT LoRA adapter
+on the prepared `train` split (`transformers` + `peft`, targeting
+`q_proj`/`v_proj`); `scripts/merge_and_convert.py --dry-run` then previews the
+adapter merge and CTranslate2 conversion. Every speaker must sit in exactly one
+split; the `test` split is never tuned on.
+
+## Hint strategy comparison
+
+```sh
+python scripts/compare_hints.py \
+  --manifest data/manifests/nigerian_phone.csv \
+  --audio-dir /srv/private-speech \
+  --hint "forty five thousand naira" \
+  --hotword "Adaeze" --hotword "Ikeja"
+```
+
+Writes `results/raw/hints_{run_id}.csv` comparing `none`, `prompt`,
+`hotwords`, and `both` modes. The pinned openai-whisper release has no dedicated
+`hotwords` decoding option, so hotword terms flow through the same
+`initial_prompt` channel as phrase hints; the comparison measures which terms
+actually help.
 
 ## Local model setup
 

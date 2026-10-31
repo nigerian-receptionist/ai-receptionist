@@ -42,9 +42,7 @@ def main() -> None:
         max_seconds=args.max_turn_seconds,
         barge_in=not args.no_barge_in,
         tts_model=model_id,
-        stt_model={"whisper": "stt_fw_small", "underdog": "stt_underdog_bark"}[
-            args.stt_model
-        ],
+        stt_model={"whisper": "stt_fw_small", "underdog": "stt_underdog_bark"}[args.stt_model],
     )
 
 

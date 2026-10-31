@@ -57,7 +57,12 @@ def main() -> None:
     parser.add_argument(
         "--audio-dir", type=Path, required=True, help="Private source-audio directory"
     )
-    parser.add_argument("--split", choices=["dev", "test"], default="dev")
+    parser.add_argument(
+        "--split",
+        choices=["dev", "test", "train"],
+        default="dev",
+        help="Benchmark the dev or test split; train rows are for inspection only",
+    )
     parser.add_argument(
         "--models", nargs="+", default=["stt_fw_turbo", "stt_fw_large", "stt_fw_small"]
     )

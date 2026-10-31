@@ -1,5 +1,8 @@
 # Model candidates are experimental until their exact weights and licences are
 # verified. Never place HF_TOKEN or other credentials in this file.
+# Fine-tuned Whisper checkpoints (`stt_ft_own`, LoRA on the consented manifest)
+# become a registry entry only after merge_and_convert.py output passes the
+# benchmark gates; until then no adapter loads them.
 stt:
   baseline:
     id: stt_fw_turbo

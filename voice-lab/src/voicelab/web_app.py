@@ -48,9 +48,7 @@ def _tts(model_id: str):
 
 
 def _authorized_yarn_voices() -> list[str]:
-    directory = Path(
-        os.getenv("YARNGPT2_SPEAKERS_DIR", "models/yarngpt2/speakers")
-    ).expanduser()
+    directory = Path(os.getenv("YARNGPT2_SPEAKERS_DIR", "models/yarngpt2/speakers")).expanduser()
     allowed: list[str] = []
     if directory.is_dir():
         for profile_path in sorted(directory.glob("*.json")):
@@ -83,9 +81,7 @@ def status() -> dict[str, Any]:
     except Exception:
         installed = []
         ready = False
-    whisper_cache = Path(
-        os.getenv("WHISPER_CACHE_DIR") or Path.home() / ".cache" / "whisper"
-    )
+    whisper_cache = Path(os.getenv("WHISPER_CACHE_DIR") or Path.home() / ".cache" / "whisper")
     whisper_small_ready = (whisper_cache / "small.pt").is_file()
     whisper_tiny_ready = (whisper_cache / "tiny.pt").is_file()
     kokoro_model = Path(os.getenv("KOKORO_MODEL_PATH", "models/kokoro/kokoro-v1.0.onnx"))
@@ -139,14 +135,18 @@ def status() -> dict[str, Any]:
         or Path(os.getenv("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
     )
     yarn_cache = hub_cache / "models--saheedniyi--YarnGPT2"
-    yarn_model_cached = any(
-        (snapshot / "config.json").is_file()
-        and any(
-            (snapshot / filename).is_file()
-            for filename in ("model.safetensors", "pytorch_model.bin")
+    yarn_model_cached = (
+        any(
+            (snapshot / "config.json").is_file()
+            and any(
+                (snapshot / filename).is_file()
+                for filename in ("model.safetensors", "pytorch_model.bin")
+            )
+            for snapshot in (yarn_cache / "snapshots").glob("*")
         )
-        for snapshot in (yarn_cache / "snapshots").glob("*")
-    ) if (yarn_cache / "snapshots").is_dir() else False
+        if (yarn_cache / "snapshots").is_dir()
+        else False
+    )
     yarn_ready = (
         bool(yarn_voices)
         and codec_config.is_file()
@@ -162,8 +162,7 @@ def status() -> dict[str, Any]:
         yarn_reason = "YarnGPT2 is missing its WavTokenizer source or codec files."
     elif not yarn_model_cached and hub_offline:
         yarn_reason = (
-            "YarnGPT2 weights are missing from the local cache and "
-            "HF_HUB_OFFLINE is enabled."
+            "YarnGPT2 weights are missing from the local cache and HF_HUB_OFFLINE is enabled."
         )
     else:
         yarn_reason = "YarnGPT2 weights are not fully cached yet."
@@ -222,9 +221,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
             stt_result = _stt(request.stt_model).transcribe_file(
                 str(audio_path), language="en", word_timestamps=False
             )
-            timings["transcription_seconds"] = round(
-                time.perf_counter() - transcribe_started, 2
-            )
+            timings["transcription_seconds"] = round(time.perf_counter() - transcribe_started, 2)
             transcript = stt_result.text.strip()
             if not transcript:
                 yield _stream_event("error", message="I couldn't make out any speech. Try again.")
@@ -238,9 +235,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
             ):
                 yield _stream_event(
                     "error",
-                    message=(
-                        "Choose a YarnGPT2 profile with documented voice authorization."
-                    ),
+                    message=("Choose a YarnGPT2 profile with documented voice authorization."),
                 )
                 return
             phase = f"loading {request.tts_model}"
@@ -278,9 +273,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
                     if not content:
                         continue
                     if "first_token_seconds" not in timings:
-                        timings["first_token_seconds"] = round(
-                            time.perf_counter() - llm_started, 2
-                        )
+                        timings["first_token_seconds"] = round(time.perf_counter() - llm_started, 2)
                     full_reply.append(content)
                     pending_text += content
                     while match := re.search(r"[.!?](?:\s|$)", pending_text):
@@ -302,9 +295,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
                             2,
                         )
                         if first_audio:
-                            timings["first_audio_seconds"] = round(
-                                time.perf_counter() - started, 2
-                            )
+                            timings["first_audio_seconds"] = round(time.perf_counter() - started, 2)
                             first_audio = False
                         yield _stream_event(
                             "audio",
@@ -319,19 +310,13 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
                     yield _stream_event("text", text=safe_tail)
                     phase = f"synthesizing with {request.tts_model}"
                     speech_started = time.perf_counter()
-                    audio = tts.synthesize(
-                        safe_tail, voice_id=request.voice_id, language=language
-                    )
+                    audio = tts.synthesize(safe_tail, voice_id=request.voice_id, language=language)
                     timings["speech_seconds"] = round(
-                        timings.get("speech_seconds", 0.0)
-                        + time.perf_counter()
-                        - speech_started,
+                        timings.get("speech_seconds", 0.0) + time.perf_counter() - speech_started,
                         2,
                     )
                     if first_audio:
-                        timings["first_audio_seconds"] = round(
-                            time.perf_counter() - started, 2
-                        )
+                        timings["first_audio_seconds"] = round(time.perf_counter() - started, 2)
                     yield _stream_event(
                         "audio",
                         audio_wav_base64=base64.b64encode(
@@ -373,8 +358,7 @@ def stream_turn(request: TurnRequest) -> StreamingResponse:
             yield _stream_event(
                 "error",
                 message=(
-                    f"There was a problem {phase} "
-                    f"({type(error).__name__}: {str(error)[:180]})."
+                    f"There was a problem {phase} ({type(error).__name__}: {str(error)[:180]})."
                 ),
             )
         finally:
@@ -409,9 +393,7 @@ def turn(request: TurnRequest) -> dict[str, Any]:
             stt = _stt(request.stt_model)
             phase = f"transcribing with {request.stt_model}"
             started = time.perf_counter()
-            stt_result = stt.transcribe_file(
-                str(audio_path), language="en", word_timestamps=False
-            )
+            stt_result = stt.transcribe_file(str(audio_path), language="en", word_timestamps=False)
             timings["transcription_seconds"] = round(time.perf_counter() - started, 2)
         finally:
             audio_path.unlink(missing_ok=True)
@@ -426,8 +408,7 @@ def turn(request: TurnRequest) -> dict[str, Any]:
         safe_history = [
             {"role": entry["role"], "content": entry["content"][:2000]}
             for entry in request.history[-10:]
-            if entry.get("role") in {"user", "assistant"}
-            and isinstance(entry.get("content"), str)
+            if entry.get("role") in {"user", "assistant"} and isinstance(entry.get("content"), str)
         ]
         try:
             started = time.perf_counter()
@@ -483,8 +464,5 @@ def turn(request: TurnRequest) -> dict[str, Any]:
         logger.exception("Voice turn failed while %s", phase)
         raise HTTPException(
             status_code=500,
-            detail=(
-                f"There was a problem {phase} "
-                f"({type(error).__name__}: {str(error)[:240]})."
-            ),
+            detail=(f"There was a problem {phase} ({type(error).__name__}: {str(error)[:240]})."),
         ) from error
