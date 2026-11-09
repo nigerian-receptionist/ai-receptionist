@@ -1,10 +1,17 @@
 import { Module } from "@nestjs/common";
+import { APP_FILTER } from "@nestjs/core";
 
+import { AgentsController } from "./agents/agents.controller";
+import { ProblemJsonFilter } from "./common/problem.filter";
 import { ConfigModule } from "./config/config.module";
+import { DbModule } from "./db/db.module";
 import { HealthController } from "./health/health.controller";
+import { InteractionsController } from "./interactions/interactions.controller";
+import { InteractionsModule } from "./interactions/interactions.module";
 
 @Module({
-  imports: [ConfigModule],
-  controllers: [HealthController],
+  imports: [ConfigModule, DbModule, InteractionsModule],
+  controllers: [HealthController, AgentsController, InteractionsController],
+  providers: [{ provide: APP_FILTER, useClass: ProblemJsonFilter }],
 })
 export class AppModule {}
