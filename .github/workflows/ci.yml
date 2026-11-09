@@ -21,3 +21,51 @@ jobs:
         run: pre-commit run --all-files
       - name: Check Python syntax
         run: python -m compileall -q voice-lab/src voice-lab/scripts
+
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: ai_receptionist
+          POSTGRES_USER: ai_receptionist
+          POSTGRES_PASSWORD: change-me-local-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ai_receptionist -d ai_receptionist"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "23"
+          cache: pnpm
+          cache-dependency-path: backend/pnpm-lock.yaml
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm lint
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Unit tests
+        run: pnpm test
+      - name: Migrate and seed
+        run: pnpm db:setup
+        env:
+          DATABASE_MIGRATION_URL: postgresql://ai_receptionist:change-me-local-only@127.0.0.1:5432/ai_receptionist
+          DEV_TENANT_ID: 0195f3a0-0000-7000-8000-000000000001
+      - name: Integration and leak tests
+        run: pnpm test:integration
+        env:
+          DATABASE_URL: postgresql://ai_receptionist_app:change-me-app-local-only@127.0.0.1:5432/ai_receptionist
+          DATABASE_MIGRATION_URL: postgresql://ai_receptionist:change-me-local-only@127.0.0.1:5432/ai_receptionist
