@@ -32,3 +32,10 @@ voice-lab/data/models/
 .env
 .env.*
 !.env.example
+
+# Pre-rendered voice blocks (PCM cache, gitignored)
+backend/.cache/
+# VAD runtime assets copied from node_modules by pnpm vad:assets
+frontend/public/vad/
+# Agent handoff report (never commit)
+AGENT_REPORT.md
