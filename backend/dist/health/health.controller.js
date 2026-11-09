@@ -11,10 +11,25 @@ var __metadata = (this && this.__metadata) || function (k, v) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.HealthController = void 0;
 const common_1 = require("@nestjs/common");
+const db_service_1 = require("../db/db.service");
 let HealthController = class HealthController {
+    db;
+    constructor(db) {
+        this.db = db;
+    }
     /** Reports that the process responds; this is not a dependency check. */
     health() {
         return { status: "ok", service: "ai-receptionist-api" };
+    }
+    /** Readiness: 200 when Postgres answers, 503 otherwise. Unauthenticated. */
+    async ready() {
+        try {
+            await this.db.checkConnection();
+        }
+        catch {
+            throw new common_1.ServiceUnavailableException("Database unreachable");
+        }
+        return { status: "ok" };
     }
 };
 exports.HealthController = HealthController;
@@ -24,7 +39,14 @@ __decorate([
     __metadata("design:paramtypes", []),
     __metadata("design:returntype", Object)
 ], HealthController.prototype, "health", null);
+__decorate([
+    (0, common_1.Get)("v1/ready"),
+    __metadata("design:type", Function),
+    __metadata("design:paramtypes", []),
+    __metadata("design:returntype", Promise)
+], HealthController.prototype, "ready", null);
 exports.HealthController = HealthController = __decorate([
-    (0, common_1.Controller)()
+    (0, common_1.Controller)(),
+    __metadata("design:paramtypes", [db_service_1.DbService])
 ], HealthController);
 //# sourceMappingURL=health.controller.js.map
