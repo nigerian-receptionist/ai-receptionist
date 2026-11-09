@@ -11,7 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "voice:smoke": "tsx --env-file=.env scripts/voice-smoke.ts"
   },
   "dependencies": {
     "@nestjs/common": "12.4.2",

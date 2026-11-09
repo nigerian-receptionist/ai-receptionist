@@ -198,15 +198,19 @@ export class VoiceSession {
       llmModel: this.deps.llm.model,
     });
     this.setState("notice");
-    // Warm vendor sessions and pre-render blocks (incl. fallbacks) concurrently.
-    const [sttSession, ttsSession, disclosure] = await Promise.all([
-      this.deps.stt.startSession({ sampleRate: 16000, language: "en" }),
-      this.deps.tts.startSession({ sampleRate: this.deps.config.outputSampleRate }),
-      this.deps.blocks.render(DISCLOSE_AI_BLOCK, { orgName: this.agent.orgName, voiceId: this.agent.voiceId }),
-      this.deps.blocks.render(RECORDING_NOTICE_BLOCK, { orgName: this.agent.orgName, voiceId: this.agent.voiceId }),
-      this.deps.blocks.render(HOLD_BLOCK, { orgName: this.agent.orgName, voiceId: this.agent.voiceId }),
-      this.deps.blocks.render(SILENCE_PROMPT_BLOCK, { orgName: this.agent.orgName, voiceId: this.agent.voiceId }),
-    ]);
+    // Warm up sequentially: the speech plan allows only 2 concurrent requests,
+    // so a burst of connects + renders would be throttled (HTTP 429).
+    const sttSession = await this.deps.stt.startSession({ sampleRate: 16000, language: "en" });
+    const ttsSession = await this.deps.tts.startSession({ sampleRate: this.deps.config.outputSampleRate });
+    const disclosure = await this.deps.blocks.render(DISCLOSE_AI_BLOCK, {
+      orgName: this.agent.orgName,
+      voiceId: this.agent.voiceId,
+    });
+    // Pre-render the remaining blocks in the background (also sequentially);
+    // every play path re-renders on demand, so a background failure only costs latency.
+    void this.preRenderBackgroundBlocks().catch((error: unknown) =>
+      this.deps.log({ msg: "blocks.prerender_failed", error: errorMessage(error) }),
+    );
     if (this.ended) {
       await sttSession.close().catch(() => undefined);
       await ttsSession.close().catch(() => undefined);
@@ -222,6 +226,14 @@ export class VoiceSession {
     this.startNoticeTimer();
     await this.playBlock("notice-disclosure", disclosure);
     this.starting = false;
+  }
+
+  private async preRenderBackgroundBlocks(): Promise<void> {
+    const agent = this.agent as NonNullable<typeof this.agent>;
+    for (const block of [RECORDING_NOTICE_BLOCK, HOLD_BLOCK, SILENCE_PROMPT_BLOCK]) {
+      if (this.ended) return;
+      await this.deps.blocks.render(block, { orgName: agent.orgName, voiceId: agent.voiceId });
+    }
   }
 
   private startNoticeTimer(): void {

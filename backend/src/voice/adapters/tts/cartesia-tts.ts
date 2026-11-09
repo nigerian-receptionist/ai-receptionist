@@ -70,9 +70,8 @@ export class CartesiaTts implements TextToSpeech {
     const startedAt = performance.now();
     const timeout = AbortSignal.timeout(this.restTimeoutMs);
     const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
-    let response: Response;
-    try {
-      response = await fetch("https://api.cartesia.ai/tts/bytes", {
+    const request = (): Promise<Response> =>
+      fetch("https://api.cartesia.ai/tts/bytes", {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.apiKey}`,
@@ -89,6 +88,14 @@ export class CartesiaTts implements TextToSpeech {
         }),
         signal,
       });
+    let response: Response;
+    try {
+      response = await request();
+      if (response.status === 429) {
+        // One retry: throttling is usually a brief concurrency burst.
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        response = await request();
+      }
     } catch (error) {
       throw ttsError("rest request failed", error);
     }
