@@ -23,9 +23,9 @@ export const envSchema = z.object({
 
   CARTESIA_API_KEY: z.string().min(1),
   CARTESIA_VERSION: z.string().default("2025-04-16"),
-  STT_MODEL: z.string().default("ink-whisper"),
+  STT_MODEL: z.string().default("ink-2"),
   STT_LANGUAGE: z.string().default("en"),
-  TTS_MODEL: z.string().default("sonic-2"),
+  TTS_MODEL: z.string().default("sonic-3.6"),
   /** Cartesia voice "seun" (Nigerian accent). See ADR 0007. */
   TTS_VOICE: z.string().default("63b389ff-8a8c-4013-a4d6-df3b893812df"),
   TTS_SAMPLE_RATE: z.coerce.number().int().default(24000),

@@ -36,3 +36,7 @@ voice-lab/data/models/
 # Build output and local caches
 dist/
 backend/.cache/
+# VAD runtime assets copied from node_modules by pnpm vad:assets
+frontend/public/vad/
+# Agent handoff report (never commit)
+AGENT_REPORT.md

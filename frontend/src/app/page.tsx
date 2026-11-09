@@ -39,6 +39,7 @@ export default function Home() {
         <p className="mb-3 mt-10 text-[11px] font-semibold uppercase tracking-[.16em] text-[#89928a]">Workspace</p>
         <nav className="grid gap-1 text-sm">
           <a className="rounded-lg bg-[#edf3ef] px-3 py-2.5 font-semibold text-[#183f35]" href="/">Overview</a>
+          <a className="rounded-lg px-3 py-2.5 text-[#3c4740] hover:bg-[#f1f3f0]" href="/talk">Talk to the agent</a>
           <span className="px-3 py-2.5 text-[#7d877e]">Contacts <small className="float-right">Soon</small></span>
           <span className="px-3 py-2.5 text-[#7d877e]">Agents <small className="float-right">Soon</small></span>
           <span className="px-3 py-2.5 text-[#7d877e]">Call logs <small className="float-right">Soon</small></span>
