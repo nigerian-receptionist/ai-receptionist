@@ -1,0 +1,47 @@
+import { z } from "zod";
+
+const csv = z
+  .string()
+  .transform((value) => value.split(",").map((item) => item.trim()).filter(Boolean));
+
+/** Every runtime setting, validated once at startup. Documented in .env.example. */
+export const envSchema = z.object({
+  APP_ENV: z.enum(["local", "dev", "staging", "prod"]).default("local"),
+  PORT: z.coerce.number().int().positive().default(8000),
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
+  DEFAULT_TIMEZONE: z.string().default("Africa/Lagos"),
+  ALLOWED_ORIGINS: csv.default(["http://localhost:3000", "http://127.0.0.1:3000"]),
+  /** Connects as the non-owner application role so row-level security applies. */
+  DATABASE_URL: z.string().url(),
+  /** Owner role; used only by migrations and seeding, never by the running app. */
+  DATABASE_MIGRATION_URL: z.string().url().optional(),
+  VALKEY_URL: z.string().url().default("redis://127.0.0.1:6379/0"),
+
+  /** Local-only stand-in for real auth: this token maps to DEV_TENANT_ID. Refused outside local/dev. */
+  DEV_ACCESS_TOKEN: z.string().min(24).optional(),
+  DEV_TENANT_ID: z.string().uuid().optional(),
+
+  CARTESIA_API_KEY: z.string().min(1),
+  CARTESIA_VERSION: z.string().default("2025-04-16"),
+  STT_MODEL: z.string().default("ink-whisper"),
+  STT_LANGUAGE: z.string().default("en"),
+  TTS_MODEL: z.string().default("sonic-2"),
+  /** Cartesia voice "seun" (Nigerian accent). See ADR 0007. */
+  TTS_VOICE: z.string().default("63b389ff-8a8c-4013-a4d6-df3b893812df"),
+  TTS_SAMPLE_RATE: z.coerce.number().int().default(24000),
+
+  MUSE_API_KEY: z.string().min(1),
+  LLM_BASE_URL: z.string().url().default("https://api.meta.ai/v1"),
+  LLM_MODEL: z.string().default("muse-spark-1.3-contributor"),
+  LLM_REASONING_EFFORT: z.enum(["minimal", "low", "medium", "high"]).default("minimal"),
+  LLM_MAX_COMPLETION_TOKENS: z.coerce.number().int().positive().default(400),
+
+  /** End-of-turn silence the browser VAD waits for, in ms (AGENTS.md 10.3). */
+  ENDPOINTING_SILENCE_MS: z.coerce.number().int().positive().default(600),
+});
+
+export type Env = z.infer<typeof envSchema>;
+
+export function loadEnv(source: NodeJS.ProcessEnv = process.env): Env {
+  return envSchema.parse(source);
+}

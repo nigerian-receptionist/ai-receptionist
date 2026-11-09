@@ -101,26 +101,26 @@ If a directory does not exist yet, create it only when its milestone starts.
 
 | Layer | Choice |
 |---|---|
-| Backend | Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2, Alembic, pytest, ruff, mypy |
+| Backend | Node.js 22+, NestJS 11, TypeScript strict, Drizzle ORM, Zod, Vitest (ADR 0006). `voice-lab/` stays Python |
 | Data | PostgreSQL (pgvector, row-level security), Valkey |
 | Workflows | Temporal (from M5; not needed in M1 to M4) |
 | Frontend | Next.js, TypeScript (strict), Tailwind, shadcn/ui, TanStack Query, React Hook Form, Zod |
 | Tooling | `uv` (Python), `pnpm` (Node), Docker Compose, GitHub Actions, Gitleaks |
-| **Speech (STT and TTS)** | **Free or open-source only. See section 5.** |
+| **Speech (STT and TTS)** | **Cartesia streaming STT and TTS behind adapters (ADR 0007); open source preferred. See section 5.** |
 | Voice runtime (from M4) | LiveKit SIP with LiveKit Agents, or Pipecat. Decide by ADR in M4 |
-| LLM gateway | LiteLLM in front of any model provider |
+| LLM | Muse Spark 1.3 contributor via the OpenAI-compatible Meta endpoint, behind an adapter (ADR 0007) |
 
 ### 4.2 LLM during development
-Speech must be open source. The language model may be a hosted API during development, but keep it behind LiteLLM so it can be swapped. For a fully free local setup in the voice lab, run a small open model (for example a Qwen or Llama instruct model through Ollama or vLLM). Record which model each experiment used. Never hard-code a provider.
+The language model may be a hosted API, but keep it behind the LLM adapter (OpenAI chat-completions protocol, base URL and model from env) so it can be swapped. For a fully free local setup in the voice lab, run a small open model (for example a Qwen or Llama instruct model through Ollama or vLLM). Record which model each experiment used. Never hard-code a provider.
 
 ### 4.3 Not allowed without an ADR
 Adding a framework, database, queue, vendor SDK or model family not listed here. Write the ADR first (section 18).
 
 ---
 
-## 5. Speech stack policy: free and open source only
+## 5. Speech stack policy: open source preferred
 
-**This is a hard rule.**
+**Amended by ADR 0007 (2026-11-10):** the owner approved hosted Cartesia STT and TTS for the real-time loop. Rules 2 to 4 and 6 below are relaxed for Cartesia only; every other hosted speech vendor still needs an ADR. All speech code still goes through the adapter interfaces, and data-transfer terms must be confirmed with counsel before real contact data is used.
 
 1. **Allowed for STT and TTS:** open-source models and libraries that run on our own hardware or rented GPUs, under licences that permit our intended use, plus free tools used offline (ffmpeg, sox).
 2. **Forbidden in the product path and in any default config:** paid or metered speech APIs and services, including hosted STT or TTS from cloud vendors, ElevenLabs-style voice services, Deepgram-style APIs, and OpenAI speech endpoints. Do not add their SDKs, keys or adapters.
