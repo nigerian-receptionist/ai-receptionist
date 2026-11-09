@@ -2,9 +2,60 @@
 
 TypeScript NestJS API and real-time voice gateway. See ADR 0006 and ADR 0007.
 
-```
+## Setup
+
+```sh
+# From the repo root: start Postgres (127.0.0.1:5433) and Valkey.
+docker compose up -d
+
 cd backend
+cp .env.example .env   # then fill in real API keys (never commit .env)
 pnpm install
-pnpm dev        # http://127.0.0.1:8000/v1/health
-pnpm test
+pnpm db:setup          # migrate as owner + seed demo tenant/agent (idempotent)
+pnpm dev               # http://127.0.0.1:8000/v1/health
 ```
+
+## Database roles
+
+| Role | URL variable | Used by |
+|---|---|---|
+| `ai_receptionist` (owner) | `DATABASE_MIGRATION_URL` | `db:migrate`, `db:seed` only |
+| `ai_receptionist_app` (LOGIN, no superuser, no BYPASSRLS) | `DATABASE_URL` | The running app and DB tests |
+
+The app role has only `SELECT/INSERT/UPDATE/DELETE` grants; every tenant table
+has `FORCE ROW LEVEL SECURITY` with a `tenant_isolation` policy on
+`app.tenant_id`. All tenant access goes through `DbService.withTenant`, which
+opens a transaction and runs `SELECT set_config('app.tenant_id', $1, true)`.
+With no tenant set the app role sees zero rows (see `test/leak/`).
+
+Production must pre-create `ai_receptionist_app` with a vault password; the
+migration only applies the placeholder password when creating the role.
+
+## Commands
+
+```sh
+pnpm lint              # eslint
+pnpm typecheck          # tsc --noEmit
+pnpm test              # unit tests (no DB needed)
+pnpm test:integration  # store + RLS leak tests against real Postgres
+pnpm db:migrate        # drizzle-kit migrations + roles/RLS (owner)
+pnpm db:seed           # demo tenant "Demo Microfinance Ltd" + agent "Ada"
+pnpm db:setup          # migrate + seed
+pnpm build && pnpm start
+```
+
+## REST (`/v1`)
+
+Guarded by `DevAuthGuard` (`Authorization: Bearer <DEV_ACCESS_TOKEN>`, local/dev
+only) except readiness. Errors are RFC 9457 `application/problem+json`.
+
+| Endpoint | Auth | Notes |
+|---|---|---|
+| `GET /v1/health`, `GET /health` | no | Process liveness |
+| `GET /v1/ready` | no | 200 when Postgres answers `SELECT 1`, else 503 |
+| `GET /v1/agents` | yes | Tenant's agents, oldest first |
+| `GET /v1/interactions?limit=&cursor=` | yes | Newest first, keyset cursor, stable |
+| `GET /v1/interactions/:id` | yes | Interaction with turns ordered by seq |
+
+Public ids are prefixed (`int_…`, `trn_…`, `agt_…`); endpoints accept the
+prefixed or raw uuid form.

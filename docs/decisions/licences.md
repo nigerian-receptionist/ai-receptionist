@@ -41,3 +41,14 @@ The direct live-demo libraries are license-checked. Run an automated license
 scan over all transitive locked dependencies before production adoption.
 LGPL or other section-19 ask-first packages must not be introduced without an
 ADR.
+
+## Backend data layer (checked 2026-11-10, `backend/`)
+
+| Component | Version | License | Commercial-use status and notes | Evidence |
+|---|---|---|---|---|
+| drizzle-orm | 0.45.4 | Apache-2.0 | Allowed; ORM with SQL migrations, `pg` driver | [npm metadata](https://www.npmjs.com/package/drizzle-orm) |
+| drizzle-kit | 0.31.11 | MIT | Allowed; migration generator (dev only) | [npm metadata](https://www.npmjs.com/package/drizzle-kit) |
+| pg | 8.23.1 | MIT | Allowed; Postgres client | [npm metadata](https://www.npmjs.com/package/pg) |
+| @types/pg | 8.23.1 | MIT | Allowed; types (dev only) | [npm metadata](https://www.npmjs.com/package/@types/pg) |
+| libphonenumber-js | 1.13.15 | MIT | Allowed; E.164 normalisation | [npm metadata](https://www.npmjs.com/package/libphonenumber-js) |
+| dotenv | 16.4.7 | BSD-2-Clause | Allowed; local `.env` loading | [npm metadata](https://www.npmjs.com/package/dotenv) |
