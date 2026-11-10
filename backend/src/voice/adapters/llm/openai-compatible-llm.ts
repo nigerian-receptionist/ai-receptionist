@@ -13,6 +13,7 @@ export class OpenAiCompatibleLlm implements LlmClient {
   private readonly reasoningEffort: string;
   private readonly defaultMaxTokens: number;
   private readonly requestTimeoutMs: number;
+  private readonly onSkippedPayload: ((count: number) => void) | null;
 
   constructor(opts: {
     baseUrl: string;
@@ -22,6 +23,8 @@ export class OpenAiCompatibleLlm implements LlmClient {
     maxCompletionTokens: number;
     /** Overall timeout per request, including a slow stream. */
     requestTimeoutMs?: number;
+    /** Called once per stream when malformed SSE payloads were skipped. */
+    onSkippedPayload?: (count: number) => void;
   }) {
     this.baseUrl = opts.baseUrl.replace(/\/$/, "");
     this.apiKey = opts.apiKey;
@@ -29,6 +32,7 @@ export class OpenAiCompatibleLlm implements LlmClient {
     this.reasoningEffort = opts.reasoningEffort;
     this.defaultMaxTokens = opts.maxCompletionTokens;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 60_000;
+    this.onSkippedPayload = opts.onSkippedPayload ?? null;
   }
 
   async *streamChat(
@@ -62,16 +66,23 @@ export class OpenAiCompatibleLlm implements LlmClient {
     const parser = new SseParser();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
+    let skipped = 0;
+    const emit = function* (payloads: string[]): Generator<LlmEvent> {
+      for (const payload of payloads) {
+        const event = parseChunk(payload);
+        if (event) yield event;
+        else skipped += 1;
+      }
+    };
     try {
       for (;;) {
         const { value, done } = await reader.read();
         if (done) break;
-        for (const payload of parser.push(decoder.decode(value, { stream: true }))) {
-          const event = parseChunk(payload);
-          if (event) yield event;
-        }
+        yield* emit(parser.push(decoder.decode(value, { stream: true })));
         if (parser.isDone) break;
       }
+      yield* emit(parser.flush());
+      if (skipped > 0) this.onSkippedPayload?.(skipped);
     } catch (error) {
       if (signal.aborted) throw abortError(opts.signal);
       throw llmError("stream failed", error);

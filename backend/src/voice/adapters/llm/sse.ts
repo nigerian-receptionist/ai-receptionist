@@ -34,6 +34,22 @@ export class SseParser {
   get isDone(): boolean {
     return this.done;
   }
+
+  /**
+   * Flush the trailing buffer at stream end: a final `data:` line without a
+   * trailing newline still carries a payload. Returns it (or nothing).
+   */
+  flush(): string[] {
+    if (this.done || this.buffer === "") return [];
+    const line = this.buffer;
+    this.buffer = "";
+    const payload = parseLine(line.trim());
+    if (payload === "[DONE]") {
+      this.done = true;
+      return [];
+    }
+    return payload === null ? [] : [payload];
+  }
 }
 
 function parseLine(line: string): string | null {

@@ -8,9 +8,10 @@
  * survives for boundary detection.
  */
 
-/** Abbreviations (lowercase, without the period) that never end a sentence. */
+/** Abbreviations (lowercase, without periods) that never end a sentence. */
 const ABBREVIATIONS = new Set([
   "mr", "mrs", "ms", "dr", "prof", "rev", "st", "ave", "blvd", "no", "vs", "etc", "eg", "ie",
+  "ltd", "sr", "jr",
 ]);
 
 /** A comma becomes a boundary once the current segment exceeds this length. */
@@ -93,7 +94,9 @@ function consumeRun(text: string, i: number): number {
 
 /** A comma boundary only needs whitespace after it; the next clause may start lowercase. */
 function isCommaBoundaryAfter(text: string, i: number): boolean {
-  if (i >= text.length) return true;
+  // No lookahead yet (comma at buffer end): wait for the next delta instead
+  // of risking a mid-number split ("thousand," + "000").
+  if (i >= text.length) return false;
   const next = text[i] as string;
   if (next !== " " && next !== "\t" && next !== "\n") return false;
   let j = i;
@@ -126,22 +129,26 @@ function isSentenceEnd(text: string, punctAt: number, runEnd: number): boolean {
   while (after < text.length && (text[after] === " " || text[after] === "\t")) after += 1;
   const afterChar = after < text.length ? (text[after] as string) : "";
   if (text[punctAt] === "." && isDigit(before) && isDigit(afterChar)) return false;
+  // A period directly glued to a letter is never a boundary ("e.g.", "U.S.A").
+  const nextRaw = runEnd < text.length ? (text[runEnd] as string) : "";
+  if (text[punctAt] === "." && nextRaw !== "" && /[A-Za-z]/.test(nextRaw)) return false;
   // Abbreviations never end a sentence ("Mr. Smith").
   if (text[punctAt] === ".") {
-    const token = tokenBefore(text, punctAt);
+    const { token, raw } = tokenBefore(text, punctAt);
     if (ABBREVIATIONS.has(token)) return false;
     // Initials ("J. K. Rowling"): single capital letter followed by period.
-    if (/^[A-Z]$/.test(token) && afterChar !== "" && afterChar === afterChar.toUpperCase()) return false;
+    if (/^[A-Z]$/.test(raw) && afterChar !== "" && afterChar === afterChar.toUpperCase()) return false;
   }
   // A boundary needs a following space/end; without lookahead yet, wait for more text.
   if (after >= text.length) return false;
   return true;
 }
 
-function tokenBefore(text: string, punctAt: number): string {
+function tokenBefore(text: string, punctAt: number): { token: string; raw: string } {
   let start = punctAt - 1;
-  while (start >= 0 && /[A-Za-z]/.test(text[start] as string)) start -= 1;
-  return text.slice(start + 1, punctAt).toLowerCase();
+  while (start >= 0 && /[A-Za-z.]/.test(text[start] as string)) start -= 1;
+  const raw = text.slice(start + 1, punctAt);
+  return { token: raw.replace(/\./g, "").toLowerCase(), raw };
 }
 
 /** Split a complete string (convenience wrapper for tests and one-shot use). */

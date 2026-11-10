@@ -126,6 +126,7 @@ export class VoiceGateway implements OnGatewayConnection, OnGatewayDisconnect, O
         model: this.env.LLM_MODEL,
         reasoningEffort: this.env.LLM_REASONING_EFFORT,
         maxCompletionTokens: this.env.LLM_MAX_COMPLETION_TOKENS,
+        onSkippedPayload: (count) => this.log(principal.tenantId, { msg: "llm.skipped_payloads", count }),
       }),
       blocks: new BlockRenderer(
         new CartesiaTts({
