@@ -40,6 +40,13 @@ export const envSchema = z.object({
   LLM_MODEL: z.string().default("muse-spark-1.3-contributor"),
   LLM_REASONING_EFFORT: z.enum(["minimal", "low", "medium", "high"]).default("minimal"),
   LLM_MAX_COMPLETION_TOKENS: z.coerce.number().int().positive().default(400),
+  /** Fire a throwaway prefix-matching chat completion while the notice plays. */
+  LLM_WARMUP_ENABLED: z.stringbool().default(true),
+
+  /** Play a pre-rendered ack when the LLM's first token is slow. */
+  ACK_ENABLED: z.stringbool().default(true),
+  /** First-token wait before the ack plays, in ms. */
+  ACK_DELAY_MS: z.coerce.number().int().positive().default(400),
 
   /** End-of-turn silence the browser VAD waits for, in ms (AGENTS.md 10.3). */
   ENDPOINTING_SILENCE_MS: z.coerce.number().int().positive().default(600),

@@ -1,3 +1,5 @@
+import { Agent } from "undici";
+
 import type { ChatMessage, LlmClient, LlmEvent, TokenUsage } from "../types";
 import { SseParser } from "./sse";
 
@@ -5,6 +7,11 @@ import { SseParser } from "./sse";
  * LLM adapter speaking the OpenAI chat-completions protocol over fetch, so the
  * provider stays swappable (ADR 0007). Streaming responses are parsed as SSE;
  * the caller's AbortSignal cancels the request mid-stream.
+ *
+ * All requests on this instance share one keep-alive agent, so the
+ * notice-time warmup and turn 1 reuse a connection instead of paying TLS
+ * again. Idle sockets survive 30s (past the ~7.5s notice plus the caller's
+ * first utterance); the 10-minute cap is undici's default.
  */
 export class OpenAiCompatibleLlm implements LlmClient {
   readonly model: string;
@@ -14,6 +21,7 @@ export class OpenAiCompatibleLlm implements LlmClient {
   private readonly defaultMaxTokens: number;
   private readonly requestTimeoutMs: number;
   private readonly onSkippedPayload: ((count: number) => void) | null;
+  private readonly dispatcher: Agent;
 
   constructor(opts: {
     baseUrl: string;
@@ -33,16 +41,7 @@ export class OpenAiCompatibleLlm implements LlmClient {
     this.defaultMaxTokens = opts.maxCompletionTokens;
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 60_000;
     this.onSkippedPayload = opts.onSkippedPayload ?? null;
-  }
-
-  /** Best-effort warmup: a cheap `GET /models` opens TLS + keep-alive early. */
-  async prewarm(): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/models`, {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-      signal: AbortSignal.timeout(10_000),
-    });
-    await response.text().catch(() => undefined);
-    if (!response.ok) throw new Error(`llm prewarm http ${response.status}`);
+    this.dispatcher = new Agent({ keepAliveTimeout: 30_000, keepAliveMaxTimeout: 600_000 });
   }
 
   async *streamChat(
@@ -65,6 +64,7 @@ export class OpenAiCompatibleLlm implements LlmClient {
           reasoning_effort: this.reasoningEffort,
         }),
         signal,
+        dispatcher: this.dispatcher,
       });
     } catch (error) {
       throw llmError("request failed", error);

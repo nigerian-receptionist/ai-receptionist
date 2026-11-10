@@ -17,11 +17,16 @@ import type {
   TtsStreamSession,
   WordTiming,
 } from "./adapters/types";
-import { BlockRenderer, type BlockDefinition } from "./blocks/block-cache";
+import { ACK_BLOCKS, BlockRenderer, type BlockDefinition } from "./blocks/block-cache";
 import type { ClientMessage } from "./client-messages";
 import type { ServerMessage } from "./protocol";
 import { InMemoryInteractionStore } from "./testing/in-memory-interaction-store";
-import { VoiceSession, truncateSpoken, type VoiceSessionConfig } from "./voice-session";
+import {
+  LLM_WARMUP_USER_MESSAGE,
+  VoiceSession,
+  truncateSpoken,
+  type VoiceSessionConfig,
+} from "./voice-session";
 
 const TENANT = "0195f3a0-0000-7000-8000-000000000001";
 
@@ -221,28 +226,53 @@ class FakeLlm implements LlmClient {
   readonly seenMessages: ChatMessage[][] = [];
   /** Replies whose streams ran to completion (M27 pipelining tests). */
   readonly finishedReplies: string[] = [];
+  /** Per-call stream records, in call order (warmup-abort tests). */
+  readonly calls: Array<{ isWarmup: boolean; deltas: number; aborted: boolean }> = [];
   /** When set, the stream parks after yielding word `afterWords` (M28 tests). */
   barrier: { afterWords: number; gate: Promise<void> } | null = null;
+  /** Gates awaited before the first delta, one per call in order (slow-LLM tests). */
+  readonly firstTokenGates: Array<Promise<void>> = [];
+  /** The next N calls throw before yielding (warmup-failure tests). */
+  failNextCalls = 0;
   constructor(readonly replies: string[]) {}
   async *streamChat(messages: ChatMessage[], opts: { signal?: AbortSignal }): AsyncIterable<LlmEvent> {
     this.seenMessages.push(messages);
-    const reply = this.replies.shift() ?? "Okay.";
-    const words = reply.split(" ");
-    for (let i = 0; i < words.length; i += 1) {
-      if (opts.signal?.aborted) throw aborted();
-      await tick();
-      if (opts.signal?.aborted) throw aborted();
-      const bare = i === words.length - 1 || (this.barrier !== null && i === this.barrier.afterWords);
-      yield { kind: "delta", text: bare ? (words[i] as string) : `${words[i]} ` };
-      if (this.barrier !== null && i === this.barrier.afterWords) {
-        const gate = this.barrier.gate;
-        this.barrier = null;
-        await gate;
-        if (opts.signal?.aborted) throw aborted();
+    const last = messages[messages.length - 1];
+    const isWarmup = last?.role === "user" && last.content === LLM_WARMUP_USER_MESSAGE;
+    // Warmup requests are provider-side only: a multi-word canned reply that
+    // never consumes the scripted turn replies.
+    const reply = isWarmup ? "Okay sure thing friend." : (this.replies.shift() ?? "Okay.");
+    const record = { isWarmup, deltas: 0, aborted: false };
+    this.calls.push(record);
+    try {
+      if (this.failNextCalls > 0) {
+        this.failNextCalls -= 1;
+        throw new Error("llm boom");
       }
+      const gate = this.firstTokenGates.shift();
+      if (gate) await gate;
+      if (opts.signal?.aborted) throw aborted();
+      const words = reply.split(" ");
+      for (let i = 0; i < words.length; i += 1) {
+        if (opts.signal?.aborted) throw aborted();
+        await tick();
+        if (opts.signal?.aborted) throw aborted();
+        const bare = i === words.length - 1 || (this.barrier !== null && i === this.barrier.afterWords);
+        // Count before yielding: a consumer that breaks here still got the delta.
+        record.deltas += 1;
+        yield { kind: "delta", text: bare ? (words[i] as string) : `${words[i]} ` };
+        if (this.barrier !== null && i === this.barrier.afterWords) {
+          const barrierGate = this.barrier.gate;
+          this.barrier = null;
+          await barrierGate;
+          if (opts.signal?.aborted) throw aborted();
+        }
+      }
+      yield { kind: "usage", usage: { in: 10, out: 5, reasoning: 2 } };
+      this.finishedReplies.push(reply);
+    } finally {
+      record.aborted = opts.signal?.aborted ?? false;
     }
-    yield { kind: "usage", usage: { in: 10, out: 5, reasoning: 2 } };
-    this.finishedReplies.push(reply);
   }
 }
 
@@ -313,6 +343,9 @@ function makeHarness(opts: {
       maxSessionS: 900,
       maxBytesPerSec: 64000,
       maxTranscriptChars: 2000,
+      llmWarmupEnabled: true,
+      ackEnabled: true,
+      ackDelayMs: 400,
       ...opts.config,
     },
     send: (message) => sent.push(message),
@@ -418,7 +451,7 @@ describe("VoiceSession", () => {
     await completeNotice(h);
     await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
     expect(h.session.currentState).toBe("listening");
-    expect(h.llm.seenMessages).toHaveLength(0);
+    expect(turnCalls(h)).toHaveLength(0);
     expect(h.sent.some((m) => m.type === "turn.metrics")).toBe(false);
   });
 
@@ -924,7 +957,7 @@ describe("VoiceSession", () => {
     });
     const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
     // The LLM pipeline starts while the caller write is still parked...
-    await vi.waitFor(() => expect(h.llm.seenMessages).toHaveLength(1));
+    await vi.waitFor(() => expect(turnCalls(h)).toHaveLength(1));
     releaseCaller();
     await turn;
     // ...and the caller write still lands before the agent write.
@@ -965,7 +998,7 @@ describe("VoiceSession", () => {
     // The first turn parks on STT readiness, then proceeds once connected.
     const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(h.llm.seenMessages).toHaveLength(0);
+    expect(turnCalls(h)).toHaveLength(0);
     openStt();
     await turn;
     expect(h.sent.filter((m) => m.type === "transcript.final")).toHaveLength(1);
@@ -1010,11 +1043,11 @@ describe("VoiceSession", () => {
     });
     await completeNotice(h);
     await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
-    expect(h.llm.seenMessages).toHaveLength(1);
+    expect(turnCalls(h)).toHaveLength(1);
     await h.session.handleMessage({ type: "input.speech_ended", atMs: 200 });
     await vi.waitFor(() => expect(h.closed).toHaveLength(1));
     expect(h.closed[0]).toMatchObject({ code: 1000, reason: "agent_ended" });
-    expect(h.llm.seenMessages).toHaveLength(1);
+    expect(turnCalls(h)).toHaveLength(1);
     const fatal = h.sent.find((m) => m.type === "error" && (m as { fatal?: boolean }).fatal === true);
     expect(fatal).toMatchObject({ code: "internal" });
     expect(h.logs.some((l) => l.msg === "session.turns_capped")).toBe(true);
@@ -1096,13 +1129,339 @@ describe("VoiceSession", () => {
     });
     await completeNotice(h);
     await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
-    const userMsg = h.llm.seenMessages[0]?.find((m) => m.role === "user");
+    const userMsg = turnCalls(h)[0]?.find((m) => m.role === "user");
     expect(userMsg?.content).toHaveLength(100);
     const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
     expect(turns[0]?.text).toBe(long.trim());
     const final = h.sent.find((m) => m.type === "transcript.final");
     expect(final).toMatchObject({ text: long.trim() });
     expect(h.logs.some((l) => l.msg === "session.transcript_capped")).toBe(true);
+  });
+
+  describe("llm warmup", () => {
+    it("sends a byte-identical system prefix during the notice, aborted after the first token", async () => {
+      const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello there."] });
+      await h.session.handleMessage(START);
+      // The warmup fires while the notice plays, before any turn exists.
+      await vi.waitFor(() => expect(h.llm.seenMessages).toHaveLength(1));
+      const warmup = h.llm.seenMessages[0] ?? [];
+      expect(warmup).toHaveLength(2);
+      expect(warmup[0]?.role).toBe("system");
+      expect(warmup[1]).toEqual({ role: "user", content: LLM_WARMUP_USER_MESSAGE });
+
+      await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-disclosure" });
+      await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-notice" });
+      expect(h.session.currentState).toBe("listening");
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+
+      // Turn 1 reuses the identical prefix via the shared builder.
+      expect(turnCalls(h)).toHaveLength(1);
+      const turn1 = turnCalls(h)[0] ?? [];
+      expect(JSON.stringify(turn1[0])).toBe(JSON.stringify(warmup[0]));
+      expect(turn1[1]).toEqual({ role: "user", content: "Hi." });
+
+      // Aborted after the first token: the 4-word warmup reply yields 1 delta.
+      expect(h.llm.calls[0]).toMatchObject({ isWarmup: true, deltas: 1, aborted: true });
+      await vi.waitFor(() =>
+        expect(h.logs.find((l) => l["msg"] === "llm.warmup")).toMatchObject({
+          outcome: "first_token",
+          durationMs: expect.any(Number),
+        }),
+      );
+
+      // Never touches TTS, history, or storage.
+      expect(h.tts.spoken.join(" ")).not.toContain("sure thing");
+      expect(turn1.some((m) => m.content.includes("sure thing"))).toBe(false);
+      const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+      expect(turns.map((t) => t.speaker)).toEqual(["caller", "agent"]);
+      expect(JSON.stringify(turns)).not.toContain("sure thing");
+    });
+
+    it("a warmup failure neither delays nor breaks the session", async () => {
+      const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello there."] });
+      h.llm.failNextCalls = 1;
+      await h.session.handleMessage(START);
+      await vi.waitFor(() =>
+        expect(h.logs.find((l) => l["msg"] === "llm.warmup")).toMatchObject({ outcome: "error" }),
+      );
+      await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-disclosure" });
+      await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-notice" });
+      expect(h.session.currentState).toBe("listening");
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(h.sent.some((m) => m.type === "turn.metrics")).toBe(true);
+      expect(h.session.currentState).toBe("listening");
+      // No error surfaced to the client; no warmup text logged.
+      expect(h.sent.some((m) => m.type === "error")).toBe(false);
+      expect(JSON.stringify(h.logs.find((l) => l["msg"] === "llm.warmup"))).not.toContain("Reply with OK");
+    });
+
+    it("turn 1 does not wait for an in-flight warmup", async () => {
+      const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello there."] });
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
+      });
+      h.llm.firstTokenGates.push(gate); // parks the warmup's first token
+      await h.session.handleMessage(START);
+      await vi.waitFor(() => expect(h.llm.seenMessages).toHaveLength(1));
+      await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-disclosure" });
+      await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-notice" });
+      // The full turn completes while the warmup is still parked...
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(h.sent.some((m) => m.type === "turn.metrics")).toBe(true);
+      expect(turnCalls(h)).toHaveLength(1);
+      // ...and the warmup settles afterwards without touching the turn.
+      openGate();
+      await vi.waitFor(() =>
+        expect(h.logs.find((l) => l["msg"] === "llm.warmup")).toMatchObject({ outcome: "first_token" }),
+      );
+      expect(h.llm.calls[0]).toMatchObject({ isWarmup: true, deltas: 1, aborted: true });
+    });
+
+    it("skips the warmup when disabled", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["Hello there."],
+        config: { llmWarmupEnabled: false },
+      });
+      await completeNotice(h);
+      expect(h.llm.seenMessages).toHaveLength(0);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(turnCalls(h)).toHaveLength(1);
+      expect(h.logs.some((l) => l["msg"] === "llm.warmup")).toBe(false);
+    });
+  });
+
+  describe("instant acknowledgement", () => {
+    const ACK_IDS = ACK_BLOCKS.map((b) => b.id);
+    const ACK_TEXTS = ACK_BLOCKS.map((b) => b.template);
+
+    function deferredGate(): { gate: Promise<void>; open: () => void } {
+      let open!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        open = resolve;
+      });
+      return { gate, open };
+    }
+
+    it("plays one ack when the first token is slower than ACK_DELAY_MS", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["Hello there."],
+        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+      });
+      const slow = deferredGate();
+      h.llm.firstTokenGates.push(slow.gate);
+      await completeNotice(h);
+      const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      await vi.waitFor(() => expect(ackBlockIds(h)).toHaveLength(1));
+      slow.open();
+      await turn;
+
+      expect(ackBlockIds(h)).toHaveLength(1);
+      expect(ACK_IDS).toContain(ackBlockIds(h)[0]);
+      const ackUtterance = ackUtterances(h)[0] as string;
+      // The utterance id marks acks for clients and scripts (silence-check).
+      expect(ackUtterance.startsWith("ack-")).toBe(true);
+      // Ack text passes the speech normaliser untouched.
+      const ackText = h.sent.find(
+        (m) => m.type === "agent.text" && (m as { utteranceId: string }).utteranceId === ackUtterance,
+      );
+      expect(ACK_TEXTS).toContain((ackText as { delta: string }).delta);
+
+      // The reply queues after the ack: no interleave, nothing dropped.
+      const turnId = currentTurnId(h);
+      const order = turnAudioOrder(h);
+      expect(order.length).toBeGreaterThan(1);
+      const lastAck = order.lastIndexOf(ackUtterance);
+      const firstReply = order.indexOf(turnId);
+      expect(lastAck).toBeGreaterThanOrEqual(0);
+      expect(firstReply).toBeGreaterThan(lastAck);
+      expect(h.sent).toContainEqual({ type: "agent.audio.end", utteranceId: ackUtterance });
+      expect(h.sent).toContainEqual({ type: "agent.audio.end", utteranceId: turnId });
+
+      // Caller-experienced ack timing is logged server-side; the wire metrics
+      // stay reply-only (frozen TurnTimingsMs).
+      const completed = h.logs.find((l) => l["msg"] === "turn.completed");
+      expect(completed).toMatchObject({ ack_first_audio_ms: expect.any(Number) });
+      const metrics = h.sent.find((m) => m.type === "turn.metrics");
+      expect(metrics?.type).toBe("turn.metrics");
+      if (metrics?.type !== "turn.metrics") throw new Error("no metrics");
+      expect("ack_first_audio" in metrics.timingsMs).toBe(false);
+      expect(typeof metrics.timingsMs.end_to_first_audio).toBe("number");
+      const agentTurn = (h.store.interactions.get(h.interactionId())?.turns ?? []).find(
+        (t) => t.speaker === "agent",
+      );
+      expect(typeof agentTurn?.timingsMs["ack_first_audio"]).toBe("number");
+      expect(agentTurn?.text).toBe("Hello there.");
+    });
+
+    it("skips the ack when the first token beats ACK_DELAY_MS", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["Hello there."],
+        config: { llmWarmupEnabled: false, ackDelayMs: 100 },
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(ackBlockIds(h)).toHaveLength(0);
+      expect(turnAudioOrder(h).some((id) => id.startsWith("ack-"))).toBe(false);
+      expect(h.logs.find((l) => l["msg"] === "turn.completed")).toMatchObject({
+        ack_first_audio_ms: null,
+      });
+      const agentTurn = (h.store.interactions.get(h.interactionId())?.turns ?? []).find(
+        (t) => t.speaker === "agent",
+      );
+      expect(agentTurn?.timingsMs["ack_first_audio"]).toBeUndefined();
+    });
+
+    it("never acks when disabled, however slow the LLM is", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["Hello there."],
+        config: { llmWarmupEnabled: false, ackEnabled: false, ackDelayMs: 30 },
+      });
+      const slow = deferredGate();
+      h.llm.firstTokenGates.push(slow.gate);
+      await completeNotice(h);
+      const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      setTimeout(slow.open, 100);
+      await turn;
+      expect(ackBlockIds(h)).toHaveLength(0);
+      expect(h.sent.some((m) => m.type === "turn.metrics")).toBe(true);
+    });
+
+    it("rotates acks without repeating the last one", async () => {
+      const h = makeHarness({
+        sttFinals: ["One.", "Two."],
+        llmReplies: ["First answer here.", "Second answer here."],
+        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+      });
+      const first = deferredGate();
+      const second = deferredGate();
+      h.llm.firstTokenGates.push(first.gate, second.gate);
+      await completeNotice(h);
+      const turn1 = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      await vi.waitFor(() => expect(ackBlockIds(h)).toHaveLength(1));
+      first.open();
+      await turn1;
+      const turn2 = h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+      await vi.waitFor(() => expect(ackBlockIds(h)).toHaveLength(2));
+      second.open();
+      await turn2;
+      const [one, two] = ackBlockIds(h);
+      expect(one).not.toBe(two);
+    });
+
+    it("acks stay out of history and storage", async () => {
+      const h = makeHarness({
+        sttFinals: ["One.", "Two."],
+        llmReplies: ["First answer here.", "Second answer here."],
+        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+      });
+      const slow = deferredGate();
+      h.llm.firstTokenGates.push(slow.gate);
+      await completeNotice(h);
+      const turn1 = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      await vi.waitFor(() => expect(ackBlockIds(h)).toHaveLength(1));
+      slow.open();
+      await turn1;
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+      // Turn 2 sees the reply only, never the ack.
+      const turn2Messages = turnCalls(h)[1] ?? [];
+      expect(turn2Messages.filter((m) => m.role === "assistant")).toEqual([
+        { role: "assistant", content: "First answer here." },
+      ]);
+      const blob =
+        JSON.stringify(h.llm.seenMessages) +
+        JSON.stringify(h.store.interactions.get(h.interactionId())?.turns);
+      for (const text of ACK_TEXTS) expect(blob).not.toContain(text);
+    });
+
+    it("barge-in during an ack stops the ack and cancels the pending reply", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi.", "Thanks."],
+        llmReplies: ["Hello there.", "You are welcome."],
+        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+      });
+      const slow = deferredGate();
+      h.llm.firstTokenGates.push(slow.gate);
+      await completeNotice(h);
+      const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      await vi.waitFor(() => expect(ackUtterances(h)).toHaveLength(1));
+      const ackUtterance = ackUtterances(h)[0] as string;
+      await vi.waitFor(() =>
+        expect(
+          h.sent.some(
+            (m) => m.type === "agent.audio" && (m as { utteranceId: string }).utteranceId === ackUtterance,
+          ),
+        ).toBe(true),
+      );
+      const turnId = currentTurnId(h);
+      await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+      slow.open();
+      await turn;
+
+      expect(h.session.currentState).toBe("listening");
+      expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: ackUtterance });
+      expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: turnId });
+      // The reply never flowed: no reply audio, and no agent turn to store
+      // (the model said nothing yet), so no store error either.
+      expect(turnAudioOrder(h).filter((id) => id === turnId)).toHaveLength(0);
+      expect(
+        (h.store.interactions.get(h.interactionId())?.turns ?? []).filter((t) => t.speaker === "agent"),
+      ).toHaveLength(0);
+      expect(h.logs.some((l) => l["msg"] === "store.append_turn_failed")).toBe(false);
+      // The next turn is clean: history holds no ack.
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 20 });
+      const turn2Messages = turnCalls(h)[1] ?? [];
+      expect(turn2Messages.some((m) => ACK_TEXTS.includes(m.content))).toBe(false);
+    });
+
+    it("a tail barge after an acked turn stops the reply and the still-playing ack", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["Hello there."],
+        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+      });
+      const slow = deferredGate();
+      h.llm.firstTokenGates.push(slow.gate);
+      await completeNotice(h);
+      const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      await vi.waitFor(() => expect(ackUtterances(h)).toHaveLength(1));
+      const ackUtterance = ackUtterances(h)[0] as string;
+      slow.open();
+      await turn;
+      const turnId = currentTurnId(h);
+      // Reply fully sent but unacked; the ack is unacked too: barge the tail.
+      await h.session.handleMessage({ type: "playback.progress", utteranceId: turnId, playedMs: 50 });
+      await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+      expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: turnId });
+      expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: ackUtterance });
+      expect(h.session.currentState).toBe("listening");
+      // Still exactly one stored agent turn (no duplicate from the tail barge).
+      expect(
+        (h.store.interactions.get(h.interactionId())?.turns ?? []).filter((t) => t.speaker === "agent"),
+      ).toHaveLength(1);
+    });
+
+    it("pre-renders every ack block while the notice plays", async () => {
+      const h = makeHarness();
+      const rendered: string[] = [];
+      const origRender = h.blocks.render.bind(h.blocks);
+      vi.spyOn(h.blocks, "render").mockImplementation(async (block, opts) => {
+        rendered.push(block.id);
+        return origRender(block, opts);
+      });
+      await completeNotice(h);
+      await vi.waitFor(() => {
+        expect(rendered).toEqual(expect.arrayContaining(ACK_BLOCKS.map((b) => b.id)));
+      });
+      // The notice still comes first: acks never delay the handshake.
+      expect(rendered[0]).toBe("disclose_ai");
+      const firstAck = Math.min(...ACK_BLOCKS.map((b) => rendered.indexOf(b.id)));
+      expect(rendered.indexOf("recording_notice")).toBeLessThan(firstAck);
+    });
   });
 
   describe("silence window (heard-anchored)", () => {
@@ -1278,6 +1637,53 @@ describe("VoiceSession", () => {
         vi.useRealTimers();
       }
     });
+
+    it("an ack does not start the silence window: prompt fires 8s after the reply is heard", async () => {
+      vi.useFakeTimers();
+      try {
+        // 8s of reply audio, so the backstop (duration+3s) cannot fire first.
+        const canned = new Map<string, FakeUtterance>([[SENTENCE, { pcm: makePcm(8), words: [] }]]);
+        const h = makeHarness({
+          sttFinals: ["Hi."],
+          llmReplies: [SENTENCE],
+          ttsCanned: canned,
+          config: {
+            llmWarmupEnabled: false,
+            ackDelayMs: 400,
+            silencePromptAfterMs: 8000,
+            silenceEndAfterMs: 20000,
+          },
+        });
+        await completeNotice(h);
+        let openGate!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          openGate = resolve;
+        });
+        h.llm.firstTokenGates.push(gate);
+        const turnDone = h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+        // The ack timer (400ms) fires while the LLM is still gated.
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(ackBlockIds(h)).toHaveLength(1);
+        const ackUtterance = ackUtterances(h)[0] as string;
+        openGate();
+        await vi.advanceTimersByTimeAsync(2000);
+        await turnDone;
+        expect(h.session.currentState).toBe("listening");
+        const turnId = currentTurnId(h);
+        // Acking only the ack starts no window...
+        await h.session.handleMessage({ type: "playback.done", utteranceId: ackUtterance });
+        await vi.advanceTimersByTimeAsync(8000);
+        expect(hasSilencePrompt(h)).toBe(false);
+        // ...the window starts when the reply is heard.
+        await h.session.handleMessage({ type: "playback.done", utteranceId: turnId });
+        await vi.advanceTimersByTimeAsync(7900);
+        expect(hasSilencePrompt(h)).toBe(false);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(hasSilencePrompt(h)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 });
 
@@ -1285,6 +1691,47 @@ function currentTurnId(h: Harness): string {
   const final = h.sent.find((m) => m.type === "transcript.final");
   if (final?.type !== "transcript.final") throw new Error("no transcript.final yet");
   return final.turnId;
+}
+
+/** LLM calls for real turns (the notice-time warmup call excluded). */
+function turnCalls(h: Harness): ChatMessage[][] {
+  return h.llm.seenMessages.filter((messages) => {
+    const last = messages[messages.length - 1];
+    return !(last?.role === "user" && last.content === LLM_WARMUP_USER_MESSAGE);
+  });
+}
+
+/** Block ids of ack utterances the server started (agent.text kind=block, ack_*). */
+function ackBlockIds(h: Harness): string[] {
+  return h.sent
+    .filter(
+      (m) =>
+        m.type === "agent.text" &&
+        (m as { kind?: string }).kind === "block" &&
+        String((m as { blockId?: string }).blockId ?? "").startsWith("ack_"),
+    )
+    .map((m) => (m as { blockId?: string }).blockId as string);
+}
+
+/** Utterance ids of ack utterances the server started (in start order). */
+function ackUtterances(h: Harness): string[] {
+  return h.sent
+    .filter(
+      (m) =>
+        m.type === "agent.text" &&
+        (m as { kind?: string }).kind === "block" &&
+        String((m as { blockId?: string }).blockId ?? "").startsWith("ack_"),
+    )
+    .map((m) => (m as { utteranceId: string }).utteranceId);
+}
+
+/** agent.audio utterance ids in send order, excluding the notice handshake. */
+function turnAudioOrder(h: Harness): string[] {
+  return h.sent
+    .filter(
+      (m) => m.type === "agent.audio" && !(m as { utteranceId: string }).utteranceId.startsWith("notice-"),
+    )
+    .map((m) => (m as { utteranceId: string }).utteranceId);
 }
 
 describe("truncateSpoken", () => {

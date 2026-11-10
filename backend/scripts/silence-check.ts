@@ -358,7 +358,13 @@ async function main(): Promise<void> {
   };
 
   function shortId(id: string): string {
-    return id.startsWith("notice-") || id === "hold" || id === "silence-prompt" ? id : `reply-${id.slice(0, 8)}`;
+    if (id.startsWith("notice-") || id === "hold" || id === "silence-prompt") return id;
+    if (id.startsWith("ack-")) return `ack-${id.slice(4, 12)}`;
+    return `reply-${id.slice(0, 8)}`;
+  }
+
+  function isReplyUtterance(id: string): boolean {
+    return !id.startsWith("notice-") && !id.startsWith("ack-") && id !== "hold" && id !== "silence-prompt";
   }
 
   const done = new Promise<void>((resolve) => {
@@ -504,9 +510,7 @@ async function main(): Promise<void> {
     const t0 = performance.now();
     for (;;) {
       if (finished) return;
-      const reply = [...utterances.values()].find(
-        (u) => !u.id.startsWith("notice-") && u.id !== "hold" && u.id !== "silence-prompt",
-      );
+      const reply = [...utterances.values()].find((u) => isReplyUtterance(u.id));
       const heardEnd = reply?.audibleEndAt;
       const elapsed = performance.now() - t0;
       if (heardEnd !== null && heardEnd !== undefined) {
@@ -573,9 +577,7 @@ async function main(): Promise<void> {
         (s.cancelledAt !== null ? ` CANCELLED@${rel(s.cancelledAt)}` : ""),
     );
   }
-  const reply = [...utterances.values()].find(
-    (u) => !u.id.startsWith("notice-") && u.id !== "hold" && u.id !== "silence-prompt",
-  );
+  const reply = [...utterances.values()].find((u) => isReplyUtterance(u.id));
   const prompt = utterances.get("silence-prompt");
   console.log(`\n===== KEY GAPS =====`);
   let audibleGapMs: number | null = null;

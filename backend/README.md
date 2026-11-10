@@ -69,10 +69,22 @@ barge-in. Speech: Cartesia `ink-2` STT and `sonic-3.6` TTS (streaming
 WebSockets); LLM: Muse Spark via the OpenAI-compatible endpoint.
 
 - Adapter interfaces in `adapters/types.ts`; vendor code behind them only.
-- Pre-rendered blocks (disclosure, notice, hold, silence prompt) are cached as
-  raw PCM under `backend/.cache/blocks/` (gitignored), keyed by sha256 of
-  (text, language, voice, model, model revision, speed, tone, sample rate).
-  Bump `TTS_MODEL_REVISION` whenever the TTS model changes.
+- Pre-rendered blocks (disclosure, notice, hold, silence prompt, ack phrases)
+  are cached as raw PCM under `backend/.cache/blocks/` (gitignored), keyed by
+  sha256 of (text, language, voice, model, model revision, speed, tone, sample
+  rate). Bump `TTS_MODEL_REVISION` whenever the TTS model changes.
+- LLM warmup (`LLM_WARMUP_ENABLED`, default true): while the disclosure +
+  notice play, the session fires one throwaway streaming completion whose
+  system/persona prefix is byte-identical to turn 1's, then aborts it at the
+  first token — so turn 1 reuses a warm provider prefix and the same keep-alive
+  connection (undici `Agent`, MIT licence). Logged as `llm.warmup` with
+  outcome only, never text; failures never affect the session.
+- Instant acknowledgement (`ACK_ENABLED` default true, `ACK_DELAY_MS` default
+  400): when the LLM's first token is slower than the delay, the session plays
+  one rotating pre-rendered ack ("Okay.", "Right.", "Mm-hmm.", "Sure.") as its
+  own utterance, so the client queues the reply behind it. Acks are not model
+  content (never in history or turn text); barge-in stops them like reply
+  audio.
 - **No audio is persisted anywhere in this milestone.** Transcripts, timings
   and notice proof go to Postgres through `DrizzleInteractionStore` (the
   `InMemoryInteractionStore` is test-only now); both stores redact sensitive
@@ -80,7 +92,10 @@ WebSockets); LLM: Muse Spark via the OpenAI-compatible endpoint.
 - Errors leave the API as RFC 9457 `application/problem+json` with stable
   `urn:ai-receptionist:*` type ids (see `src/common/errors.ts`).
 - Latency: `turn.metrics` carries per-turn `stt`, `llm_first_token`,
-  `llm_total`, `tts_first_audio` and `end_to_first_audio` (ms).
+  `llm_total`, `tts_first_audio` and `end_to_first_audio` (ms, reply audio).
+  The server log (`turn.completed`) and the stored turn record additionally
+  carry `ack_first_audio` (speech end to ack audio, null when no ack played);
+  the wire `TurnTimingsMs` is frozen, so it stays server-side.
 
 Headless end-to-end check against a running backend:
 
