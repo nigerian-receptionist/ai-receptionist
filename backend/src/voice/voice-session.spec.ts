@@ -37,6 +37,9 @@ class FakeSttSession implements SttStreamSession {
   audioBytes = 0;
   finals: string[];
   closed = false;
+  /** When true, finalize() parks until release() or reset(). */
+  deferred = false;
+  private parked: Array<{ resolve: () => void; reject: (error: Error) => void }> = [];
   constructor(finals: string[]) {
     this.finals = [...finals];
   }
@@ -46,8 +49,14 @@ class FakeSttSession implements SttStreamSession {
   onEvent(_listener: (event: SttEvent) => void): void {
     // Partial events are not exercised here.
   }
+  get parkedFinalizes(): number {
+    return this.parked.length;
+  }
   async finalize(): Promise<SttResult> {
     const text = this.finals.shift() ?? "";
+    if (this.deferred) {
+      await new Promise<void>((resolve, reject) => this.parked.push({ resolve, reject }));
+    }
     return {
       text,
       language: "en",
@@ -57,6 +66,17 @@ class FakeSttSession implements SttStreamSession {
       latencyS: 0.01,
       modelId: "stt_fake@test",
     };
+  }
+  reset(): void {
+    const parked = this.parked;
+    this.parked = [];
+    for (const entry of parked) entry.reject(aborted());
+  }
+  /** Resolve every parked finalize (test control). */
+  release(): void {
+    const parked = this.parked;
+    this.parked = [];
+    for (const entry of parked) entry.resolve();
   }
   async close(): Promise<void> {
     this.closed = true;
@@ -598,6 +618,37 @@ describe("VoiceSession", () => {
     const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
     expect(turns.find((t) => t.speaker === "agent")).toMatchObject({ promptVersion: 2 });
     expect(turns.find((t) => t.speaker === "caller")?.promptVersion).toBeUndefined();
+  });
+
+  it("M1: speech during the finalize wait starts a fresh turn", async () => {
+    const h = makeHarness({
+      sttFinals: ["stale turn", "fresh turn"],
+      llmReplies: ["Fresh answer here."],
+    });
+    await completeNotice(h);
+    const sttSession = h.stt.sessions[0];
+    if (!sttSession) throw new Error("no stt session");
+    sttSession.deferred = true;
+
+    const turn1 = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    await vi.waitFor(() => expect(sttSession.parkedFinalizes).toBe(1));
+    expect(h.session.currentState).toBe("thinking");
+
+    // Caller speaks again while the server awaits the STT final.
+    await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+    expect(h.session.currentState).toBe("listening");
+
+    const turn2 = h.session.handleMessage({ type: "input.speech_ended", atMs: 20 });
+    await vi.waitFor(() => expect(sttSession.parkedFinalizes).toBe(1));
+    sttSession.release();
+    await turn1;
+    await turn2;
+
+    // The stale turn is abandoned: exactly one final, the fresh one.
+    const finals = h.sent.filter((m) => m.type === "transcript.final");
+    expect(finals).toHaveLength(1);
+    expect(finals[0]).toMatchObject({ text: "fresh turn" });
+    expect(h.session.currentState).toBe("listening");
   });
 
   it("prompts on silence, then ends the session", async () => {

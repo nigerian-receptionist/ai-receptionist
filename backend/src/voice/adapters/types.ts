@@ -41,6 +41,12 @@ export interface SttStreamSession {
   sendAudio(pcmS16le: Buffer): void;
   /** End the current utterance and resolve with its final transcript. */
   finalize(): Promise<SttResult>;
+  /**
+   * Abandon the in-flight finalize (if any) and clear buffered transcript
+   * and audio accounting, so the next turn starts clean (M1 barge-in during
+   * the finalize wait). The abandoned finalize rejects.
+   */
+  reset(): void;
   /** Register a listener for partial/final events (at most one listener). */
   onEvent(listener: (event: SttEvent) => void): void;
   close(): Promise<void>;

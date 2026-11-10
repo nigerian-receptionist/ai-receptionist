@@ -54,6 +54,11 @@ export class CartesiaStt implements SpeechToText {
   }
 }
 
+/** Frames held while the socket is still connecting (cap ~1.3 s at 20 ms/frame). */
+const MAX_CONNECTING_BUFFER_FRAMES = 64;
+/** Vendor backpressure guard: drop (and count) audio above this buffered amount. */
+const MAX_VENDOR_BUFFERED_BYTES = 256 * 1024;
+
 export class CartesiaSttSession implements SttStreamSession {
   private readonly ws: WebSocket;
   private readonly modelId: string;
@@ -71,6 +76,9 @@ export class CartesiaSttSession implements SttStreamSession {
   } | null = null;
   private failed: Error | null = null;
   private closed = false;
+  /** Audio that arrived while connecting; flushed on open, counted if dropped. */
+  private connectingBuffer: Buffer[] = [];
+  private droppedFrames = 0;
 
   constructor(
     ws: WebSocket,
@@ -84,6 +92,12 @@ export class CartesiaSttSession implements SttStreamSession {
     ws.on("message", (raw) => this.handleMessage(raw.toString()));
     ws.on("error", (error) => this.fail(error));
     ws.on("close", () => this.fail(new Error("stt websocket closed unexpectedly")));
+    ws.once("open", () => this.flushConnectingBuffer());
+  }
+
+  /** Audio frames dropped (connecting overflow, vendor backpressure, closed). */
+  get droppedAudioFrames(): number {
+    return this.droppedFrames;
   }
 
   waitForOpen(timeoutMs: number): Promise<void> {
@@ -110,20 +124,50 @@ export class CartesiaSttSession implements SttStreamSession {
   }
 
   sendAudio(pcmS16le: Buffer): void {
-    if (this.closed || this.failed) return;
-    if (this.ws.readyState !== WebSocket.OPEN) return;
+    if (this.closed || this.failed) {
+      this.droppedFrames += 1;
+      return;
+    }
+    if (this.ws.readyState === WebSocket.CONNECTING) {
+      // Buffer leading audio briefly instead of losing speech onset.
+      if (this.connectingBuffer.length < MAX_CONNECTING_BUFFER_FRAMES) {
+        this.connectingBuffer.push(pcmS16le);
+      } else {
+        this.droppedFrames += 1;
+      }
+      return;
+    }
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      this.droppedFrames += 1;
+      return;
+    }
+    if (this.ws.bufferedAmount > MAX_VENDOR_BUFFERED_BYTES) {
+      this.droppedFrames += 1;
+      return;
+    }
     this.pendingAudioS += pcmS16le.length / 2 / this.sampleRate;
     this.ws.send(pcmS16le);
+  }
+
+  private flushConnectingBuffer(): void {
+    for (const frame of this.connectingBuffer) this.sendAudio(frame);
+    this.connectingBuffer = [];
   }
 
   finalize(): Promise<SttResult> {
     if (this.failed) return Promise.reject(this.failed);
     if (this.closed) return Promise.reject(new Error("stt session closed"));
     if (this.finalizeWaiter) return Promise.reject(new Error("finalize already in flight"));
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error("stt finalize while socket not open"));
+    }
     const startedAt = performance.now();
     return new Promise<SttResult>((resolve, reject) => {
       const timer = setTimeout(() => {
+        // M2: a timed-out finalize must not poison later turns.
         this.finalizeWaiter = null;
+        this.pendingFinals = [];
+        this.pendingAudioS = 0;
         reject(new Error("stt finalize timed out"));
       }, this.finalizeTimeoutMs);
       this.finalizeWaiter = {
@@ -137,8 +181,23 @@ export class CartesiaSttSession implements SttStreamSession {
         },
         startedAt,
       };
-      this.ws.send("finalize");
+      try {
+        this.ws.send("finalize");
+      } catch (error) {
+        this.finalizeWaiter = null;
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
     });
+  }
+
+  reset(): void {
+    this.finalizeWaiter?.reject(
+      Object.assign(new Error("stt finalize abandoned"), { name: "AbortError" }),
+    );
+    this.finalizeWaiter = null;
+    this.pendingFinals = [];
+    this.pendingAudioS = 0;
   }
 
   async close(): Promise<void> {
@@ -148,7 +207,8 @@ export class CartesiaSttSession implements SttStreamSession {
     this.finalizeWaiter = null;
     if (this.ws.readyState === WebSocket.OPEN) {
       const done = new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 3000);
+        // Short grace for the vendor `done` ack; never stall disconnects long.
+        const timer = setTimeout(resolve, 500);
         this.ws.once("message", (raw) => {
           try {
             if ((JSON.parse(raw.toString()) as { type?: string }).type === "done") {
@@ -185,7 +245,13 @@ export class CartesiaSttSession implements SttStreamSession {
     if (message.type === "flush_done") {
       const waiter = this.finalizeWaiter;
       this.finalizeWaiter = null;
-      if (!waiter) return;
+      if (!waiter) {
+        // M2: late flush for an abandoned/timed-out finalize: drop the stale
+        // buffers instead of prefixing the next turn with them.
+        this.pendingFinals = [];
+        this.pendingAudioS = 0;
+        return;
+      }
       const text = this.pendingFinals.join("");
       this.pendingFinals = [];
       const audioS = this.pendingAudioS;

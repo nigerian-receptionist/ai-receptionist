@@ -400,7 +400,20 @@ export class VoiceSession {
   private handleSpeechStarted(): void {
     this.silencePrompted = false;
     this.clearSilenceTimer();
-    if (this.state === "speaking" || this.state === "thinking") this.bargeIn(0, "speech_started");
+    if (this.state === "speaking" || this.state === "thinking") {
+      if (this.currentUtteranceId) {
+        this.bargeIn(0, "speech_started");
+      } else if (this.state === "thinking") {
+        // M1: speech during the STT finalize wait (or the caller-turn write):
+        // abandon the stale turn so the new utterance is neither swallowed
+        // nor merged into it. The stale continuation observes the bumped
+        // turnSeq and returns without emitting anything.
+        this.turnSeq += 1;
+        this.sttSession?.reset();
+        this.setState("listening");
+        this.armSilenceTimer();
+      }
+    }
   }
 
   private async handleSpeechEnded(): Promise<void> {
