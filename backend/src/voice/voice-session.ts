@@ -71,7 +71,16 @@ interface ActiveUtterance {
   sentences: SentenceAudio[];
   playedMs: number;
   done: boolean;
+  /** Monotonic timestamp of the first audio chunk sent, for notice-ack validation (F2). */
+  firstSentAtMs: number | null;
 }
+
+/**
+ * Tolerance for notice-ack plausibility: the client's `playback.done` for a
+ * notice block is accepted only if at least (block duration − tolerance) of
+ * wall-clock time passed since the first audio chunk was sent.
+ */
+export const NOTICE_ACK_TOLERANCE_MS = 250;
 
 /**
  * One voice conversation. Owns the AgentState machine, the turn loop, barge-in
@@ -282,8 +291,11 @@ export class VoiceSession {
       ],
       playedMs: 0,
       done: false,
+      firstSentAtMs: null,
     });
     this.deps.send({ type: "agent.text", utteranceId, delta: rendered.text, kind: "block", blockId: rendered.block.id });
+    const entry = this.utterances.get(utteranceId);
+    if (entry) entry.firstSentAtMs = performance.now();
     this.sendPcmAsAudioMessages(utteranceId, rendered.pcmS16le);
     this.deps.send({ type: "agent.audio.end", utteranceId });
   }
@@ -310,6 +322,7 @@ export class VoiceSession {
     }
     if (this.state === "notice") {
       if (utteranceId === "notice-disclosure" && this.noticeStage === "disclosure") {
+        if (!this.noticeAckPlausible(utteranceId)) return;
         this.noticeStage = "notice";
         this.startNoticeTimer();
         const notice = await this.deps.blocks.render(RECORDING_NOTICE_BLOCK, {
@@ -320,6 +333,7 @@ export class VoiceSession {
         return;
       }
       if (utteranceId === "notice-notice" && this.noticeStage === "notice") {
+        if (!this.noticeAckPlausible(utteranceId)) return;
         this.clearNoticeTimer();
         this.noticeStage = "none";
         const notice = await this.deps.blocks.render(RECORDING_NOTICE_BLOCK, {
@@ -347,6 +361,31 @@ export class VoiceSession {
         this.armSilenceTimer();
       }
     }
+  }
+
+  /**
+   * F2: a notice `playback.done` is accepted only if the client plausibly
+   * played the block — wall-clock time since the first audio chunk was sent
+   * must cover the block duration (minus tolerance). Early or unknown acks
+   * are ignored and the notice timeout keeps running (fail closed).
+   */
+  private noticeAckPlausible(utteranceId: string): boolean {
+    const utterance = this.utterances.get(utteranceId);
+    const expectedMs = Math.round(totalDurationS(utterance?.sentences ?? []) * 1000);
+    const observedMs =
+      utterance?.firstSentAtMs === null || utterance?.firstSentAtMs === undefined
+        ? null
+        : Math.round(performance.now() - utterance.firstSentAtMs);
+    const plausible = observedMs !== null && observedMs >= expectedMs - NOTICE_ACK_TOLERANCE_MS;
+    if (!plausible) {
+      this.deps.log({
+        msg: "session.notice_ack_early",
+        utteranceId,
+        observedMs,
+        expectedMs,
+      });
+    }
+    return plausible;
   }
 
   // ---------- turn loop ----------
@@ -405,7 +444,13 @@ export class VoiceSession {
     this.ttsAbort = new AbortController();
     this.activeTimings = timings;
     this.activeRawReply = "";
-    const utterance: ActiveUtterance = { id: turnId, sentences: [], playedMs: 0, done: false };
+    const utterance: ActiveUtterance = {
+      id: turnId,
+      sentences: [],
+      playedMs: 0,
+      done: false,
+      firstSentAtMs: null,
+    };
     this.utterances.set(turnId, utterance);
     this.currentUtteranceId = turnId;
     const messages = this.buildMessages();

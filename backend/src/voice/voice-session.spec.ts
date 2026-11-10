@@ -125,7 +125,11 @@ class FakeTts implements TextToSpeech {
   readonly modelId = "tts_fake@test";
   readonly spoken: string[] = [];
   readonly ttsSession: FakeTtsSession;
-  constructor(canned: Map<string, FakeUtterance> = new Map(), gate: Promise<void> | null = null) {
+  constructor(
+    canned: Map<string, FakeUtterance> = new Map(),
+    gate: Promise<void> | null = null,
+    private readonly blockSeconds = 0.05,
+  ) {
     this.ttsSession = new FakeTtsSession(canned, gate);
   }
   voices() {
@@ -142,11 +146,11 @@ class FakeTts implements TextToSpeech {
     textSpoken: string;
     words: WordTiming[];
   }> {
-    const pcm = makePcm(0.5);
+    const pcm = makePcm(this.blockSeconds);
     return {
       pcmS16le: pcm,
       sampleRate: 24000,
-      durationS: 0.5,
+      durationS: this.blockSeconds,
       timeToFirstAudioS: 0.01,
       totalLatencyS: 0.02,
       voiceId: "fake-voice",
@@ -204,6 +208,7 @@ function makeHarness(opts: {
   llmReplies?: string[];
   ttsCanned?: Map<string, FakeUtterance>;
   ttsGate?: Promise<void> | null;
+  blockSeconds?: number;
   config?: Partial<VoiceSessionConfig>;
 } = {}): Harness {
   const sent: ServerMessage[] = [];
@@ -211,7 +216,7 @@ function makeHarness(opts: {
   const logs: Record<string, unknown>[] = [];
   const store = new InMemoryInteractionStore();
   const stt = new FakeStt(opts.sttFinals ?? []);
-  const tts = new FakeTts(opts.ttsCanned, opts.ttsGate ?? null);
+  const tts = new FakeTts(opts.ttsCanned, opts.ttsGate ?? null, opts.blockSeconds);
   const llm = new FakeLlm(opts.llmReplies ?? []);
   const blocks = new BlockRenderer(tts, mkdtempSync(join(tmpdir(), "blocks-")));
   const session = new VoiceSession({
@@ -482,6 +487,39 @@ describe("VoiceSession", () => {
       alert: "compliance_reviewer",
       reason: "notice ack timed out",
     });
+  });
+
+  it("F2: an early notice ack is ignored and the timeout keeps running", async () => {
+    const h = makeHarness({ blockSeconds: 2, config: { noticeAckTimeoutMs: 60 } });
+    await h.session.handleMessage(START);
+    expect(h.session.currentState).toBe("notice");
+
+    // Client acks with zero playout wait: must not advance the handshake.
+    await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-disclosure" });
+    expect(h.session.currentState).toBe("notice");
+    expect(h.sent.filter((m) => m.type === "agent.text")).toHaveLength(1);
+    expect(h.logs.find((l) => l["msg"] === "session.notice_ack_early")).toMatchObject({
+      utteranceId: "notice-disclosure",
+      expectedMs: 2000,
+    });
+
+    // The notice timeout still fires: fail closed, flagged.
+    await vi.waitFor(() => expect(h.closed).toHaveLength(1));
+    expect(h.store.interactions.get(h.interactionId())?.complianceFlags).toEqual(["notice_failed"]);
+    expect(h.store.interactions.get(h.interactionId())?.recordingState).not.toBe("recording");
+  });
+
+  it("F2: a notice ack after real playout time is accepted", async () => {
+    const h = makeHarness({ blockSeconds: 0.3 });
+    await h.session.handleMessage(START);
+    // 300 ms block, 250 ms tolerance: ack after 120 ms must pass.
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-disclosure" });
+    expect(h.sent.filter((m) => m.type === "agent.text")).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-notice" });
+    expect(h.session.currentState).toBe("listening");
+    expect(h.store.interactions.get(h.interactionId())?.recordingState).toBe("recording");
   });
 
   it("prompts on silence, then ends the session", async () => {
