@@ -52,6 +52,7 @@ ADR.
 | @types/pg | 8.23.1 | MIT | Allowed; types (dev only) | [npm metadata](https://www.npmjs.com/package/@types/pg) |
 | libphonenumber-js | 1.13.15 | MIT | Allowed; E.164 normalisation | [npm metadata](https://www.npmjs.com/package/libphonenumber-js) |
 | dotenv | 16.4.7 | BSD-2-Clause | Allowed; local `.env` loading | [npm metadata](https://www.npmjs.com/package/dotenv) |
+| undici | 6.29.1 | MIT | Allowed; keep-alive HTTP dispatcher for the LLM adapter (backend) | [npm metadata](https://www.npmjs.com/package/undici) |
 
 ## Realtime voice loop additions (2026-11-10, feat/realtime-voice)
 
