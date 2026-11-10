@@ -7,6 +7,7 @@ import {
   type RecordingState,
   type TurnRecord,
 } from "../../interactions/interaction-store";
+import { redact } from "../../privacy/redact";
 
 export { INTERACTION_STORE };
 
@@ -65,7 +66,14 @@ export class InMemoryInteractionStore implements InteractionStore {
   async appendTurn(tenantId: string, turn: TurnRecord): Promise<{ turnId: string }> {
     const interaction = this.get(tenantId, turn.interactionId);
     const turnId = `trn_${randomUUID().replace(/-/g, "")}`;
-    interaction.turns.push({ ...turn, turnId });
+    // M16: the MUST-redact contract (AGENTS.md 9.2) applies to tests and
+    // demos too, mirroring DrizzleInteractionStore.
+    interaction.turns.push({
+      ...turn,
+      turnId,
+      text: redact(turn.text),
+      spokenText: turn.spokenText === undefined ? undefined : redact(turn.spokenText),
+    });
     return { turnId };
   }
 

@@ -21,6 +21,7 @@ import {
 import type { ClientMessage } from "./client-messages";
 import { normaliseForSpeech } from "./normalise";
 import type { AgentState, ServerMessage, TurnTimingsMs } from "./protocol";
+import { applySpeakPolicy } from "./speak-policy";
 import { VOICE_PROTOCOL_VERSION } from "./protocol";
 import { buildSystemPrompt } from "./prompts/system";
 import { SentenceChunker } from "./sentence-chunker";
@@ -463,8 +464,17 @@ export class VoiceSession {
     let firstAudioSentAt = 0;
     let sentenceIndex = 0;
     const speakSentence = async (sentence: string): Promise<void> => {
-      const spoken = normaliseForSpeech(sentence);
+      // F3/M19: screen the raw LLM sentence for sensitive values BEFORE
+      // normalisation (which would expand digits into words) and synthesis.
+      const policy = applySpeakPolicy(sentence);
+      if (policy.tripped) {
+        this.deps.log({ msg: "guardrail.speak_policy", turnId, kinds: policy.kinds });
+      }
+      const spoken = normaliseForSpeech(policy.safe);
       if (spoken === "") return;
+      // F3: the client transcript gets the screened sentence, never raw LLM
+      // deltas, so echoed PII never reaches the browser either.
+      this.deps.send({ type: "agent.text", utteranceId: turnId, delta: `${policy.safe} `, kind: "speech" });
       const contextId = `${turnId}:s${sentenceIndex++}`;
       const ttsSentAt = performance.now();
       // Tracked progressively so a mid-sentence barge-in still sees partial audio/words.
@@ -520,7 +530,6 @@ export class VoiceSession {
         }
         rawReply += event.text;
         this.activeRawReply = rawReply;
-        this.deps.send({ type: "agent.text", utteranceId: turnId, delta: event.text, kind: "speech" });
         for (const sentence of chunker.push(event.text)) {
           await speakSentence(sentence);
           if (myTurn !== this.turnSeq || this.ended) return;

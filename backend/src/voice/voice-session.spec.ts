@@ -88,11 +88,13 @@ class FakeTtsSession implements TtsStreamSession {
   constructor(
     private readonly canned: Map<string, FakeUtterance> = new Map(),
     private gate: Promise<void> | null = null,
+    private readonly spokenLog: string[] | null = null,
   ) {}
   async *speak(
     text: string,
     opts: { contextId: string; signal?: AbortSignal },
   ): AsyncIterable<TtsStreamEvent> {
+    this.spokenLog?.push(text);
     const found = this.canned.get(text);
     const pcm = found?.pcm ?? makePcm(0.3);
     const words = found?.words ?? [];
@@ -130,7 +132,7 @@ class FakeTts implements TextToSpeech {
     gate: Promise<void> | null = null,
     private readonly blockSeconds = 0.05,
   ) {
-    this.ttsSession = new FakeTtsSession(canned, gate);
+    this.ttsSession = new FakeTtsSession(canned, gate, this.spoken);
   }
   voices() {
     return [{ voiceId: "fake-voice", language: "en", gender: "unspecified", tones: ["neutral"] }];
@@ -198,6 +200,7 @@ interface Harness {
   logs: Record<string, unknown>[];
   store: InMemoryInteractionStore;
   stt: FakeStt;
+  tts: FakeTts;
   llm: FakeLlm;
   blocks: BlockRenderer;
   interactionId: () => string;
@@ -246,6 +249,7 @@ function makeHarness(opts: {
     logs,
     store,
     stt,
+    tts,
     llm,
     blocks,
     interactionId: () => {
@@ -520,6 +524,51 @@ describe("VoiceSession", () => {
     await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-notice" });
     expect(h.session.currentState).toBe("listening");
     expect(h.store.interactions.get(h.interactionId())?.recordingState).toBe("recording");
+  });
+
+  it("F3: an echoed card number is never spoken or emitted", async () => {
+    const h = makeHarness({
+      sttFinals: ["My card is 4111 1111 1111 1111."],
+      llmReplies: ["Thanks, your card 4111 1111 1111 1111 is noted."],
+    });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+
+    // TTS never receives the digits.
+    expect(h.tts.spoken.join(" ")).not.toContain("4111");
+    expect(h.tts.spoken.join(" ")).toContain("your card number");
+    // The client transcript never receives the digits either.
+    const emitted = h.sent
+      .filter((m) => m.type === "agent.text" && (m as { kind: string }).kind === "speech")
+      .map((m) => (m as { delta: string }).delta)
+      .join("");
+    expect(emitted).not.toContain("4111");
+    expect(emitted).toContain("your card number");
+    // The guardrail trip is logged without values.
+    expect(h.logs.find((l) => l["msg"] === "guardrail.speak_policy")).toMatchObject({
+      kinds: ["card"],
+    });
+    // Storage redacts both sides (in-memory store redacts too, M16).
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns[0]?.text).toBe("My card is [CARD].");
+    expect(turns[1]?.spokenText).toContain("your card number");
+  });
+
+  it("F3: an echoed BVN is never spoken or emitted", async () => {
+    const h = makeHarness({
+      sttFinals: ["BVN 2212 345 6789."],
+      llmReplies: ["Confirming BVN 2212 345 6789 for you."],
+    });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+
+    expect(h.tts.spoken.join(" ")).not.toContain("2212");
+    const emitted = h.sent
+      .filter((m) => m.type === "agent.text" && (m as { kind: string }).kind === "speech")
+      .map((m) => (m as { delta: string }).delta)
+      .join("");
+    expect(emitted).not.toContain("2212");
+    expect(emitted).toContain("your B V N");
   });
 
   it("prompts on silence, then ends the session", async () => {
