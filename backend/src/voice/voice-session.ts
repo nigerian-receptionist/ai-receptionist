@@ -99,6 +99,14 @@ interface ActiveUtterance {
  */
 export const NOTICE_ACK_TOLERANCE_MS = 250;
 
+/**
+ * Margin after the sent audio duration before the playback backstop assumes
+ * the caller heard the reply (covers network + playout-scheduling slack). If
+ * `playback.done` never arrives, the silence window starts then. Sized to fail
+ * toward a LATE prompt, never early.
+ */
+export const PLAYBACK_BACKSTOP_MARGIN_MS = 3000;
+
 /** Caller phrases that object to recording (AGENTS.md 9.1 rule 3, M22). */
 const RECORDING_OBJECTION_RE =
   /\b(don't|do not|stop|please stop)\s+record(ing)?\b|\bno\s+recording\b|\b(stop|turn off)\s+(the\s+)?recording\b/i;
@@ -145,6 +153,7 @@ export class VoiceSession {
   private noticeTimer: NodeJS.Timeout | null = null;
   private silenceTimer: NodeJS.Timeout | null = null;
   private silenceFallbackTimer: NodeJS.Timeout | null = null;
+  private playbackBackstopTimer: NodeJS.Timeout | null = null;
   private silencePrompted = false;
   private starting = false;
   private activeTimings: TurnTimingsMs | null = null;
@@ -503,7 +512,16 @@ export class VoiceSession {
     }
     // M5: the client heard the whole turn: release the retained id and prune.
     // Unknown ids are harmless no-ops (already pruned or never tracked).
-    if (this.currentUtteranceId === utteranceId) this.currentUtteranceId = null;
+    if (this.currentUtteranceId === utteranceId) {
+      this.currentUtteranceId = null;
+      this.utterances.delete(utteranceId);
+      // Heard-anchored silence window (AGENTS.md 10.3): the 8s clock starts
+      // when the caller heard the end, not at send-complete. Stale acks (the
+      // backstop already fired, a barge-in retired the turn, a newer turn
+      // started) fall through to the no-op prune below.
+      if (!this.ended && this.state === "listening") this.armSilenceTimer();
+      return;
+    }
     this.utterances.delete(utteranceId);
   }
 
@@ -554,7 +572,8 @@ export class VoiceSession {
       this.turnSeq += 1;
       this.sttSession?.reset();
       this.setState("listening");
-      this.armSilenceTimer();
+      // The caller is speaking: no silence clock until their turn resolves
+      // (agent reply heard, empty transcript). The timer was cleared above.
     }
   }
 
@@ -864,9 +883,16 @@ export class VoiceSession {
     this.logTurn(timings, false, ttsTotal);
     // M5: the last byte is SENT here, not heard: retain currentUtteranceId
     // until playback.done so a playout-tail barge-in still cancels the audio
-    // and truncates history to what was heard (AGENTS.md 10.2).
+    // and truncates history to what was heard (AGENTS.md 10.2). State stays
+    // `listening` through the tail (least-risky option: barge-in and the
+    // speech_ended gate work unchanged); the silence clock does NOT start
+    // here. It starts on playback.done (heard-anchored, AGENTS.md 10.3), with
+    // a duration+margin backstop below if the ack never arrives.
     this.setState("listening");
-    this.armSilenceTimer();
+    this.armPlaybackBackstop(
+      turnId,
+      Math.round(totalDurationS(utterance.sentences) * 1000) + PLAYBACK_BACKSTOP_MARGIN_MS,
+    );
   }
 
   // ---------- barge-in ----------
@@ -911,7 +937,9 @@ export class VoiceSession {
       this.replaceLastAssistantMessage(spokenText);
       this.deps.log({ msg: "turn.barged_in", source, playedMs: Math.round(playedMs), tail: true });
       this.setState("listening");
-      this.armSilenceTimer();
+      // The caller is speaking: no silence clock until their turn resolves.
+      // Clears the tail backstop so it cannot arm under the new utterance.
+      this.clearSilenceTimer();
       return;
     }
     if (timings) this.deps.send({ type: "turn.metrics", turnId: utteranceId, timingsMs: { ...timings } });
@@ -947,7 +975,8 @@ export class VoiceSession {
     }
     this.deps.log({ msg: "turn.barged_in", source, playedMs: Math.round(playedMs) });
     this.setState("listening");
-    this.armSilenceTimer();
+    // The caller is speaking: no silence clock until their turn resolves.
+    this.clearSilenceTimer();
   }
 
   /** Replace the last assistant message (M5 tail fix) or drop it if unheard. */
@@ -993,6 +1022,9 @@ export class VoiceSession {
         voiceId: this.agent?.voiceId ?? this.deps.config.defaultVoiceId,
       });
       if (this.ended) return;
+      // Leaving listening: clear any stale silence/backstop arm so no prompt
+      // can fire under the hold audio. Hold's playback.done re-arms.
+      this.clearSilenceTimer();
       this.currentUtteranceId = "hold";
       this.setState("speaking");
       await this.playBlock("hold", hold);
@@ -1021,10 +1053,39 @@ export class VoiceSession {
     this.silenceTimer = null;
     if (this.silenceFallbackTimer) clearTimeout(this.silenceFallbackTimer);
     this.silenceFallbackTimer = null;
+    if (this.playbackBackstopTimer) clearTimeout(this.playbackBackstopTimer);
+    this.playbackBackstopTimer = null;
+  }
+
+  /**
+   * Backstop if `playback.done` never arrives (suspended tab, lost message):
+   * after the sent audio duration + margin, retire the still-unacked utterance
+   * and start the normal silence window. Fails toward a LATE prompt, never
+   * early. Cancelled by the ack (which arms the real window), by barge-in, and
+   * by teardown.
+   */
+  private armPlaybackBackstop(utteranceId: string, delayMs: number): void {
+    this.clearSilenceTimer();
+    this.playbackBackstopTimer = setTimeout(() => {
+      this.playbackBackstopTimer = null;
+      if (this.ended || this.currentUtteranceId !== utteranceId) return;
+      const utterance = this.utterances.get(utteranceId);
+      const durationMs = Math.round(totalDurationS(utterance?.sentences ?? []) * 1000);
+      this.deps.log({ msg: "silence.playback_backstop_used", utteranceId, durationMs, delayMs });
+      this.currentUtteranceId = null;
+      this.utterances.delete(utteranceId);
+      if (this.state === "listening") this.armSilenceTimer();
+    }, delayMs);
+    this.playbackBackstopTimer.unref?.();
   }
 
   private async handleSilenceTimeout(): Promise<void> {
     if (this.ended || this.state !== "listening") return;
+    // While agent audio is still unacked the caller is hearing it, not silent:
+    // never prompt and never overwrite the in-flight utterance id. The ack (or
+    // the backstop) starts the window. This guard also covers the M5 tail,
+    // where state is `listening` during playout.
+    if (this.currentUtteranceId !== null) return;
     if (!this.silencePrompted) {
       this.silencePrompted = true;
       try {
@@ -1032,7 +1093,8 @@ export class VoiceSession {
           orgName: this.agent?.orgName ?? "",
           voiceId: this.agent?.voiceId ?? this.deps.config.defaultVoiceId,
         });
-        if (this.ended || this.state !== "listening") return;
+        // Re-check after the await: a new turn may have started while rendering.
+        if (this.ended || this.state !== "listening" || this.currentUtteranceId !== null) return;
         this.currentUtteranceId = "silence-prompt";
         this.setState("speaking");
         await this.playBlock("silence-prompt", prompt);
