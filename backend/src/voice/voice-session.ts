@@ -11,10 +11,12 @@ import type {
   WordTiming,
 } from "./adapters/types";
 import {
+  ACK_BLOCKS,
   DISCLOSE_AI_BLOCK,
   HOLD_BLOCK,
   RECORDING_NOTICE_BLOCK,
   SILENCE_PROMPT_BLOCK,
+  type BlockDefinition,
   type BlockRenderer,
   type RenderedBlock,
 } from "./blocks/block-cache";
@@ -117,6 +119,13 @@ export const NOTICE_ACK_TOLERANCE_MS = 250;
 export const PLAYBACK_BACKSTOP_MARGIN_MS = 3000;
 
 /**
+ * Notice-time LLM warmup budget: the throwaway request is aborted at the
+ * first token or here, whichever comes first. The disclosure + notice last
+ * ~7.5s; 10s covers a slow session start.
+ */
+const LLM_WARMUP_TIMEOUT_MS = 10_000;
+
+/**
  * Throwaway user message for the notice-time LLM warmup. The request is
  * aborted at the first token and never touches history, TTS or storage.
  */
@@ -158,6 +167,7 @@ export class VoiceSession {
   private turnSeq = 0;
   private llmAbort: AbortController | null = null;
   private ttsAbort: AbortController | null = null;
+  private warmupAbort: AbortController | null = null;
   private readonly utterances = new Map<string, ActiveUtterance>();
   private currentUtteranceId: string | null = null;
   private noticeStage: "none" | "disclosure" | "notice" = "none";
@@ -168,6 +178,11 @@ export class VoiceSession {
   private noticeTimer: NodeJS.Timeout | null = null;
   private silenceTimer: NodeJS.Timeout | null = null;
   private silenceFallbackTimer: NodeJS.Timeout | null = null;
+  private ackTimer: NodeJS.Timeout | null = null;
+  private activeAckUtteranceId: string | null = null;
+  private activeAckFirstAudioMs: number | null = null;
+  /** Round-robin cursor over ACK_BLOCKS (never repeats the last ack). */
+  private ackCursor = 0;
   private playbackBackstopTimer: NodeJS.Timeout | null = null;
   private silencePrompted = false;
   private starting = false;
@@ -312,6 +327,11 @@ export class VoiceSession {
       llmModel: this.deps.llm.model,
     });
     this.setState("notice");
+    // Prefix warmup: a throwaway streaming completion whose system/persona
+    // prefix is byte-identical to turn 1's, fired while the ~7.5s
+    // disclosure + notice plays. Fire-and-forget: it never delays or breaks
+    // the handshake, and turn 1 never waits for it.
+    if (this.deps.config.llmWarmupEnabled) this.warmupLlm();
     // F4: maximum call duration (AGENTS.md 10.3), the backstop behind every
     // other cap. Cleared in endSession.
     this.maxSessionTimer = setTimeout(() => {
@@ -339,10 +359,6 @@ export class VoiceSession {
       return;
     }
     this.ttsSession = ttsSession;
-    // Warm the LLM connection during the notice handshake (best effort).
-    void this.deps.llm.prewarm?.().catch((error: unknown) =>
-      this.deps.log({ msg: "llm.prewarm_failed", error: errorMessage(error) }),
-    );
     this.sttReady = this.connectStt();
     // Pre-render the remaining blocks in the background (notice first, so the
     // disclosure->notice gap never waits on synthesis); every play path
@@ -381,9 +397,61 @@ export class VoiceSession {
     return ready;
   }
 
+  /**
+   * Throwaway prefix warmup, fired once while the notice plays. Aborts at the
+   * first content token (or the timeout); the text is discarded and never
+   * touches history, TTS or storage. Never throws: every failure only logs.
+   */
+  private warmupLlm(): void {
+    const startedAt = performance.now();
+    const controller = new AbortController();
+    this.warmupAbort = controller;
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, LLM_WARMUP_TIMEOUT_MS);
+    timeout.unref?.();
+    void (async () => {
+      let outcome: "first_token" | "timeout" | "aborted" | "empty" | "error" = "error";
+      let error: string | null = null;
+      try {
+        for await (const event of this.deps.llm.streamChat(this.buildWarmupMessages(), {
+          signal: controller.signal,
+        })) {
+          if (event.kind === "delta") {
+            outcome = "first_token";
+            controller.abort();
+            break;
+          }
+        }
+        if (outcome === "error") outcome = "empty";
+      } catch (caught) {
+        if (outcome !== "first_token") {
+          if (this.ended) outcome = "aborted";
+          else if (timedOut || controller.signal.aborted) outcome = "timeout";
+          else {
+            outcome = "error";
+            error = errorMessage(caught);
+          }
+        }
+      } finally {
+        clearTimeout(timeout);
+        if (this.warmupAbort === controller) this.warmupAbort = null;
+      }
+      // Duration and outcome only: never the throwaway text.
+      this.deps.log({
+        msg: "llm.warmup",
+        outcome,
+        durationMs: Math.round(performance.now() - startedAt),
+        ...(error === null ? {} : { error }),
+      });
+    })();
+  }
+
   private async preRenderBackgroundBlocks(): Promise<void> {
     const agent = this.agent as NonNullable<typeof this.agent>;
-    for (const block of [RECORDING_NOTICE_BLOCK, HOLD_BLOCK, SILENCE_PROMPT_BLOCK]) {
+    for (const block of [RECORDING_NOTICE_BLOCK, HOLD_BLOCK, SILENCE_PROMPT_BLOCK, ...ACK_BLOCKS]) {
       if (this.ended) return;
       await this.deps.blocks.render(block, { orgName: agent.orgName, voiceId: agent.voiceId });
     }
@@ -523,6 +591,13 @@ export class VoiceSession {
         this.setState("listening");
         this.armSilenceTimer();
       }
+      return;
+    }
+    if (utteranceId === this.activeAckUtteranceId) {
+      // An ack is never the end of the turn: prune it without arming the
+      // silence window (that waits for the reply's own playback.done).
+      this.activeAckUtteranceId = null;
+      this.utterances.delete(utteranceId);
       return;
     }
     // M5: the client heard the whole turn: release the retained id and prune.
@@ -718,6 +793,9 @@ export class VoiceSession {
     this.ttsAbort = ttsAbort;
     this.activeTimings = timings;
     this.activeRawReply = "";
+    this.clearAckTimer();
+    this.activeAckUtteranceId = null;
+    this.activeAckFirstAudioMs = null;
     const utterance: ActiveUtterance = {
       id: turnId,
       sentences: [],
@@ -827,6 +905,7 @@ export class VoiceSession {
     };
 
     try {
+      this.armAckTimer(myTurn, turnId, tSpeechEnded);
       for await (const event of this.deps.llm.streamChat(messages, { signal: llmAbort.signal })) {
         if (myTurn !== this.turnSeq || this.ended) return;
         if (event.kind === "usage") {
@@ -836,6 +915,7 @@ export class VoiceSession {
         if (llmFirstAt === 0) {
           llmFirstAt = performance.now();
           timings.llm_first_token = Math.round(llmFirstAt - tSttFinal);
+          this.clearAckTimer();
         }
         rawReply += event.text;
         this.activeRawReply = rawReply;
@@ -856,6 +936,7 @@ export class VoiceSession {
       throw error;
     } finally {
       clearIdle();
+      this.clearAckTimer();
       // M4: only clear when the next turn has not already replaced them.
       if (this.llmAbort === llmAbort) this.llmAbort = null;
       if (this.ttsAbort === ttsAbort) this.ttsAbort = null;
@@ -869,10 +950,17 @@ export class VoiceSession {
     utterance.done = true;
     this.activeTimings = null;
     this.activeRawReply = "";
+    // The ack (if any) is fully sent; its utterance stays tracked so a tail
+    // barge-in still stops it, and its own playback.done prunes it silently.
+    const ackFirstAudioMs = this.activeAckFirstAudioMs;
     const spokenText = utterance.sentences.map((s) => s.sentence).join(" ");
     // M31: TTS span lives in the store record and logs (the wire protocol's
     // TurnTimingsMs is frozen, so turn.metrics keeps the agreed fields).
     const ttsTotal = ttsStartAt === 0 ? null : Math.round(ttsDoneAt - ttsStartAt);
+    // The store record (unlike the frozen wire TurnTimingsMs) also carries the
+    // caller-experienced ack timing when an ack played.
+    const storeTimings: Record<string, number | null> = { ...timings, tts_total: ttsTotal };
+    if (ackFirstAudioMs !== null) storeTimings["ack_first_audio"] = ackFirstAudioMs;
     this.deps.send({ type: "agent.audio.end", utteranceId: turnId });
     this.deps.send({ type: "turn.metrics", turnId, timingsMs: timings });
     this.history.push({ role: "assistant", content: spokenText });
@@ -891,11 +979,11 @@ export class VoiceSession {
         promptVersion: VOICE_SYSTEM_PROMPT_VERSION,
         ttsModelId: this.deps.tts.modelId,
         voiceId: agent.voiceId,
-        timingsMs: { ...timings, tts_total: ttsTotal },
+        timingsMs: storeTimings,
         tokens: usage,
       });
     }
-    this.logTurn(timings, false, ttsTotal);
+    this.logTurn(timings, false, ttsTotal, ackFirstAudioMs);
     // M5: the last byte is SENT here, not heard: retain currentUtteranceId
     // until playback.done so a playout-tail barge-in still cancels the audio
     // and truncates history to what was heard (AGENTS.md 10.2). State stays
@@ -908,6 +996,67 @@ export class VoiceSession {
       turnId,
       Math.round(totalDurationS(utterance.sentences) * 1000) + PLAYBACK_BACKSTOP_MARGIN_MS,
     );
+  }
+
+  // ---------- instant acknowledgement ----------
+
+  private armAckTimer(myTurn: number, turnId: string, tSpeechEnded: number): void {
+    this.clearAckTimer();
+    if (!this.deps.config.ackEnabled) return;
+    this.ackTimer = setTimeout(() => {
+      this.ackTimer = null;
+      void this.maybePlayAck(myTurn, turnId, tSpeechEnded).catch((error: unknown) =>
+        this.deps.log({ msg: "ack.failed", error: errorMessage(error) }),
+      );
+    }, this.deps.config.ackDelayMs);
+    this.ackTimer.unref?.();
+  }
+
+  private clearAckTimer(): void {
+    if (this.ackTimer) clearTimeout(this.ackTimer);
+    this.ackTimer = null;
+  }
+
+  /**
+   * Play one rotating acknowledgement if the turn is still waiting for its
+   * first reply audio. The ack is a separate utterance (`ack-<turnId>`) sent
+   * atomically, so the client queues the reply behind it: never overlapping,
+   * never dropped. Not model content: never added to history or stored.
+   */
+  private async maybePlayAck(myTurn: number, turnId: string, tSpeechEnded: number): Promise<void> {
+    if (this.ended || myTurn !== this.turnSeq || this.state !== "thinking") return;
+    const agent = this.agent;
+    if (!agent) return;
+    const block = ACK_BLOCKS[this.ackCursor % ACK_BLOCKS.length] as BlockDefinition;
+    this.ackCursor += 1;
+    let rendered: RenderedBlock;
+    try {
+      rendered = await this.deps.blocks.render(block, {
+        orgName: agent.orgName,
+        voiceId: agent.voiceId,
+      });
+    } catch (error) {
+      this.deps.log({ msg: "ack.render_failed", blockId: block.id, error: errorMessage(error) });
+      return;
+    }
+    // Re-check after the render: the reply may have started flowing, or the
+    // turn may have been barged, while we waited on the cache/TTS.
+    if (this.ended || myTurn !== this.turnSeq || this.state !== "thinking") return;
+    const ackUtteranceId = `ack-${turnId}`;
+    await this.playBlock(ackUtteranceId, rendered);
+    this.activeAckUtteranceId = ackUtteranceId;
+    const ackMs = Math.round(performance.now() - tSpeechEnded);
+    this.activeAckFirstAudioMs = ackMs;
+    this.deps.log({ msg: "ack.play", blockId: block.id, ackFirstAudioMs: ackMs, turnId });
+  }
+
+  /** Stop a playing/queued ack, if any (barge-in path). */
+  private cancelActiveAck(): void {
+    if (this.activeAckUtteranceId === null) return;
+    const ackUtteranceId = this.activeAckUtteranceId;
+    this.activeAckUtteranceId = null;
+    this.utterances.delete(ackUtteranceId);
+    this.deps.send({ type: "agent.cancelled", utteranceId: ackUtteranceId });
   }
 
   // ---------- barge-in ----------
@@ -933,6 +1082,7 @@ export class VoiceSession {
     const wasDone = utterance?.done ?? false;
     const isBlock = utteranceId === "hold" || utteranceId === "silence-prompt";
     this.turnSeq += 1;
+    this.clearAckTimer();
     this.llmAbort?.abort();
     this.ttsAbort?.abort();
     this.llmAbort = null;
@@ -946,6 +1096,8 @@ export class VoiceSession {
     this.activeTimings = null;
     this.activeRawReply = "";
     this.deps.send({ type: "agent.cancelled", utteranceId });
+    // Barge-in during an ack stops the ack like any other agent audio.
+    this.cancelActiveAck();
     if (wasDone) {
       // Playout-tail barge: metrics and the full turn were already recorded.
       // Fix history to what was heard instead of appending a duplicate.
@@ -960,7 +1112,11 @@ export class VoiceSession {
     if (timings) this.deps.send({ type: "turn.metrics", turnId: utteranceId, timingsMs: { ...timings } });
     if (utterance && !utterance.done && this.interactionId !== null && !isBlock) {
       utterance.done = true;
-      if (!this.recordingObjection) {
+      // A barge before the first LLM token leaves neither model text nor
+      // heard audio: record nothing (the caller turn and the barge log
+      // already capture it). Storing empty text would only trip the turn
+      // contract's min-length validation.
+      if (!this.recordingObjection && (rawReply !== "" || spokenText !== "")) {
         this.seq += 1;
         const seq = this.seq;
         const agent = this.agent;
@@ -1025,6 +1181,10 @@ export class VoiceSession {
       return;
     }
     this.turnSeq += 1;
+    this.clearAckTimer();
+    // The failure hold queues behind a sent ack; drop the tracking so a later
+    // barge-in cannot cancel the stale ack id (its done-ack prunes silently).
+    this.activeAckUtteranceId = null;
     this.llmAbort?.abort();
     this.ttsAbort?.abort();
     this.llmAbort = null;
@@ -1150,10 +1310,12 @@ export class VoiceSession {
     this.turnSeq += 1;
     this.clearNoticeTimer();
     this.clearSilenceTimer();
+    this.clearAckTimer();
     if (this.maxSessionTimer) clearTimeout(this.maxSessionTimer);
     this.maxSessionTimer = null;
     this.llmAbort?.abort();
     this.ttsAbort?.abort();
+    this.warmupAbort?.abort();
     if (opts.fatal && !opts.quiet) {
       this.deps.send({ type: "error", code: opts.fatal.code, message: opts.fatal.message, fatal: true });
     }
@@ -1184,11 +1346,23 @@ export class VoiceSession {
     this.deps.send({ type: "state", state });
   }
 
-  private buildMessages(): ChatMessage[] {
+  /**
+   * The system/persona prefix every LLM request in this session shares. One
+   * builder for turns and the warmup, so the two cannot drift apart.
+   */
+  private buildSystemMessage(): ChatMessage {
     const agent = this.agent as NonNullable<typeof this.agent>;
-    const system = buildSystemPrompt(agent.personaPrompt);
+    return { role: "system", content: buildSystemPrompt(agent.personaPrompt) };
+  }
+
+  private buildMessages(): ChatMessage[] {
     const tail = this.history.slice(-this.deps.config.maxHistoryTurns * 2);
-    return [{ role: "system", content: system }, ...tail];
+    return [this.buildSystemMessage(), ...tail];
+  }
+
+  /** Warmup request: the turn-1 system prefix plus a throwaway user message. */
+  private buildWarmupMessages(): ChatMessage[] {
+    return [this.buildSystemMessage(), { role: "user", content: LLM_WARMUP_USER_MESSAGE }];
   }
 
   private trimHistory(): void {
@@ -1196,7 +1370,12 @@ export class VoiceSession {
     if (this.history.length > max) this.history.splice(0, this.history.length - max);
   }
 
-  private logTurn(timings: TurnTimingsMs, interrupted: boolean, ttsTotal: number | null = null): void {
+  private logTurn(
+    timings: TurnTimingsMs,
+    interrupted: boolean,
+    ttsTotal: number | null = null,
+    ackFirstAudioMs: number | null = null,
+  ): void {
     // Ids and timings only: never transcript text, never keys.
     this.deps.log({
       msg: "turn.completed",
@@ -1209,6 +1388,7 @@ export class VoiceSession {
       tts_first_audio_ms: timings.tts_first_audio,
       tts_total_ms: ttsTotal,
       end_to_first_audio_ms: timings.end_to_first_audio,
+      ack_first_audio_ms: ackFirstAudioMs,
     });
   }
 }

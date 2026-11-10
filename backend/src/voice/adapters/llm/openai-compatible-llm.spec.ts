@@ -1,3 +1,4 @@
+import { Agent } from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LlmEvent } from "../types";
@@ -81,24 +82,27 @@ describe("OpenAiCompatibleLlm", () => {
     expect(skipped).toEqual([1]);
   });
 
-  it("prewarm() opens the connection with GET /models", async () => {
-    const seen: Array<{ url: string; auth: string | null }> = [];
+  it("sends every request through one shared keep-alive dispatcher", async () => {
+    const seen: Array<unknown> = [];
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (url: string, init: { headers?: Record<string, string> }) => {
-        seen.push({ url, auth: init.headers?.["Authorization"] ?? null });
-        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      vi.fn(async (_url: string, init: { dispatcher?: unknown }) => {
+        seen.push(init.dispatcher);
+        return sseResponse(`data: ${delta("hi")}\n\n`);
       }),
     );
     const llm = new OpenAiCompatibleLlm({
       baseUrl: "https://llm.test/v1",
-      apiKey: "test-key",
+      apiKey: "test",
       model: "test-model",
       reasoningEffort: "minimal",
       maxCompletionTokens: 400,
     });
-    await llm.prewarm();
-    expect(seen).toEqual([{ url: "https://llm.test/v1/models", auth: "Bearer test-key" }]);
+    await collect(llm.streamChat([{ role: "user", content: "hi" }]));
+    await collect(llm.streamChat([{ role: "user", content: "hi" }]));
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toBeInstanceOf(Agent);
+    expect(seen[1]).toBe(seen[0]);
   });
 
   it("throws a terse error on HTTP failure", async () => {
