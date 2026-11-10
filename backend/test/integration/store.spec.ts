@@ -79,6 +79,7 @@ describe("DrizzleInteractionStore round-trip (real Postgres, app role)", () => {
       language: "en-NG",
       interrupted: false,
       llmModel: "muse-spark-1.3-contributor",
+      promptVersion: 2,
       ttsModelId: "cartesia-sonic",
       timingsMs: { llm_first_token: 300, tts_first_audio: 200 },
     });
@@ -104,6 +105,7 @@ describe("DrizzleInteractionStore round-trip (real Postgres, app role)", () => {
       "Thanks, I will send details to [EMAIL] about code [OTP].",
     );
     expect(bySeq.get(2)?.spokenText).toBe("Thanks, I will send details to [EMAIL].");
+    expect(bySeq.get(2)?.promptVersion).toBe(2);
   });
 
   it("persists compliance flags on endInteraction (M21)", async () => {

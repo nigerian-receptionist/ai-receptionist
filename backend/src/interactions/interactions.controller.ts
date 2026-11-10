@@ -58,6 +58,7 @@ function toTurnDto(row: TurnRow) {
     sttModelId: row.sttModelId,
     sttConfidence: row.sttConfidence,
     llmModel: row.llmModel,
+    promptVersion: row.promptVersion,
     ttsModelId: row.ttsModelId,
     voiceId: row.voiceId,
     blockId: row.blockId,

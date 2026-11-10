@@ -106,6 +106,7 @@ export class DrizzleInteractionStore implements InteractionStore {
         sttModelId: turn.sttModelId,
         sttConfidence: turn.sttConfidence ?? null,
         llmModel: turn.llmModel,
+        promptVersion: turn.promptVersion ?? null,
         ttsModelId: turn.ttsModelId,
         voiceId: turn.voiceId,
         blockId: turn.blockId,

@@ -120,6 +120,7 @@ export const turns = pgTable(
     sttModelId: text("stt_model_id"),
     sttConfidence: doublePrecision("stt_confidence"),
     llmModel: text("llm_model"),
+    promptVersion: integer("prompt_version"),
     ttsModelId: text("tts_model_id"),
     voiceId: text("voice_id"),
     blockId: text("block_id"),

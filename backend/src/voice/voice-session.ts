@@ -23,7 +23,7 @@ import { normaliseForSpeech } from "./normalise";
 import type { AgentState, ServerMessage, TurnTimingsMs } from "./protocol";
 import { applySpeakPolicy } from "./speak-policy";
 import { VOICE_PROTOCOL_VERSION } from "./protocol";
-import { buildSystemPrompt } from "./prompts/system";
+import { buildSystemPrompt, VOICE_SYSTEM_PROMPT_VERSION } from "./prompts/system";
 import { SentenceChunker } from "./sentence-chunker";
 
 export interface VoiceSessionConfig {
@@ -83,6 +83,10 @@ interface ActiveUtterance {
  */
 export const NOTICE_ACK_TOLERANCE_MS = 250;
 
+/** Caller phrases that object to recording (AGENTS.md 9.1 rule 3, M22). */
+const RECORDING_OBJECTION_RE =
+  /\b(don't|do not|stop|please stop)\s+record(ing)?\b|\bno\s+recording\b|\b(stop|turn off)\s+(the\s+)?recording\b/i;
+
 /**
  * One voice conversation. Owns the AgentState machine, the turn loop, barge-in
  * and the notice handshake. Transport-agnostic: the gateway delivers parsed
@@ -110,6 +114,8 @@ export class VoiceSession {
   private noticeStage: "none" | "disclosure" | "notice" = "none";
   /** True once the disclosure + notice handshake completed with proof. */
   private noticeConfirmed = false;
+  /** Set when the caller objects to recording: the call continues unrecorded. */
+  private recordingObjection = false;
   private noticeTimer: NodeJS.Timeout | null = null;
   private silenceTimer: NodeJS.Timeout | null = null;
   private silencePrompted = false;
@@ -423,6 +429,13 @@ export class VoiceSession {
         this.armSilenceTimer();
         return;
       }
+      if (!this.recordingObjection && RECORDING_OBJECTION_RE.test(callerText)) {
+        // M22 (minimal): flag, log, and continue unrecorded from this turn
+        // on. No audio is persisted in this milestone; turn writes stop.
+        // Full tenant-policy handling (transfer, contact record) is deferred.
+        this.recordingObjection = true;
+        this.deps.log({ msg: "recording.objection", interactionId: this.interactionId });
+      }
       await this.appendCallerTurn(callerText, sttResult);
       if (myTurn !== this.turnSeq || this.ended) return;
       await this.runAgentTurn(turnId, myTurn, tSpeechEnded, tSttFinal, timings);
@@ -557,20 +570,23 @@ export class VoiceSession {
     this.history.push({ role: "assistant", content: spokenText });
     this.trimHistory();
     this.seq += 1;
-    await this.deps.store.appendTurn(this.deps.tenantId, {
-      interactionId: this.interactionId as string,
-      seq: this.seq,
-      speaker: "agent",
-      text: rawReply,
-      spokenText,
-      language: agent.language,
-      interrupted: false,
-      llmModel: this.deps.llm.model,
-      ttsModelId: this.deps.tts.modelId,
-      voiceId: agent.voiceId,
-      timingsMs: { ...timings },
-      tokens: usage,
-    });
+    if (!this.recordingObjection) {
+      await this.deps.store.appendTurn(this.deps.tenantId, {
+        interactionId: this.interactionId as string,
+        seq: this.seq,
+        speaker: "agent",
+        text: rawReply,
+        spokenText,
+        language: agent.language,
+        interrupted: false,
+        llmModel: this.deps.llm.model,
+        promptVersion: VOICE_SYSTEM_PROMPT_VERSION,
+        ttsModelId: this.deps.tts.modelId,
+        voiceId: agent.voiceId,
+        timingsMs: { ...timings },
+        tokens: usage,
+      });
+    }
     this.logTurn(timings, false);
     this.currentUtteranceId = null;
     this.setState("listening");
@@ -609,24 +625,27 @@ export class VoiceSession {
     if (timings) this.deps.send({ type: "turn.metrics", turnId: utteranceId, timingsMs: { ...timings } });
     if (utterance && !utterance.done && this.interactionId !== null) {
       utterance.done = true;
-      this.seq += 1;
-      const seq = this.seq;
-      const agent = this.agent;
-      void this.deps.store
-        .appendTurn(this.deps.tenantId, {
-          interactionId: this.interactionId,
-          seq,
-          speaker: "agent",
-          text: rawReply,
-          spokenText,
-          language: agent?.language ?? "en",
-          interrupted: true,
-          llmModel: this.deps.llm.model,
-          ttsModelId: this.deps.tts.modelId,
-          voiceId: agent?.voiceId ?? this.deps.config.defaultVoiceId,
-          timingsMs: timings ? { ...timings } : {},
-        })
-        .catch((error: unknown) => this.deps.log({ msg: "store.append_turn_failed", error: errorMessage(error) }));
+      if (!this.recordingObjection) {
+        this.seq += 1;
+        const seq = this.seq;
+        const agent = this.agent;
+        void this.deps.store
+          .appendTurn(this.deps.tenantId, {
+            interactionId: this.interactionId,
+            seq,
+            speaker: "agent",
+            text: rawReply,
+            spokenText,
+            language: agent?.language ?? "en",
+            interrupted: true,
+            llmModel: this.deps.llm.model,
+            promptVersion: VOICE_SYSTEM_PROMPT_VERSION,
+            ttsModelId: this.deps.tts.modelId,
+            voiceId: agent?.voiceId ?? this.deps.config.defaultVoiceId,
+            timingsMs: timings ? { ...timings } : {},
+          })
+          .catch((error: unknown) => this.deps.log({ msg: "store.append_turn_failed", error: errorMessage(error) }));
+      }
     }
     // History keeps only what the caller actually heard.
     if (spokenText !== "") {
@@ -792,6 +811,7 @@ export class VoiceSession {
     this.history.push({ role: "user", content: callerText });
     this.trimHistory();
     this.seq += 1;
+    if (this.recordingObjection) return;
     await this.deps.store.appendTurn(this.deps.tenantId, {
       interactionId: this.interactionId as string,
       seq: this.seq,

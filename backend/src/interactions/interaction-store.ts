@@ -25,6 +25,8 @@ export interface TurnRecord {
   sttModelId?: string;
   sttConfidence?: number | null;
   llmModel?: string;
+  /** Voice system prompt version (AGENTS.md 13.2 audit trail). */
+  promptVersion?: number;
   ttsModelId?: string;
   voiceId?: string;
   /** Pre-rendered block played for this turn, if any (proof of notice delivery). */

@@ -571,6 +571,35 @@ describe("VoiceSession", () => {
     expect(emitted).toContain("your B V N");
   });
 
+  it("M22: a recording objection stops turn writes but the call continues", async () => {
+    const h = makeHarness({
+      sttFinals: ["Please do not record this call.", "What is my balance?"],
+      llmReplies: ["Recording stopped. How can I help?", "Your balance is ten naira."],
+    });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+
+    expect(h.logs.find((l) => l["msg"] === "recording.objection")).toMatchObject({
+      interactionId: h.interactionId(),
+    });
+    // The conversation continues (agent audio flows) but nothing is stored.
+    expect(h.sent.some((m) => m.type === "agent.audio")).toBe(true);
+    expect(h.store.interactions.get(h.interactionId())?.turns).toHaveLength(0);
+
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 1000 });
+    expect(h.store.interactions.get(h.interactionId())?.turns).toHaveLength(0);
+    expect(h.session.currentState).toBe("listening");
+  });
+
+  it("stores the system prompt version on agent turns", async () => {
+    const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello there."] });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns.find((t) => t.speaker === "agent")).toMatchObject({ promptVersion: 2 });
+    expect(turns.find((t) => t.speaker === "caller")?.promptVersion).toBeUndefined();
+  });
+
   it("prompts on silence, then ends the session", async () => {
     const h = makeHarness({ config: { silencePromptAfterMs: 30, silenceEndAfterMs: 40 } });
     await completeNotice(h);
