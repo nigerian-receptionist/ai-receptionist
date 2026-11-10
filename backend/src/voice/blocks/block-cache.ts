@@ -47,6 +47,19 @@ export const SILENCE_PROMPT_BLOCK: BlockDefinition = {
   template: "Hello? Are you still there?",
 };
 
+/**
+ * Instant acknowledgements played while the LLM's first token is slow. Same
+ * cache/hash rules as every block. Each is neutral backchannel phrasing: it
+ * asks for a moment of patience without promising any action, and stays well
+ * under a second of audio. The session rotates through them in order.
+ */
+export const ACK_BLOCKS: BlockDefinition[] = [
+  { id: "ack_okay", version: 1, language: "en", template: "Okay." },
+  { id: "ack_alright", version: 1, language: "en", template: "Alright." },
+  { id: "ack_mmhmm", version: 1, language: "en", template: "Mm-hmm." },
+  { id: "ack_one_moment", version: 1, language: "en", template: "One moment." },
+];
+
 /** Used when the TTS vendor exposes no model revision (see TTS_MODEL_REVISION). */
 export const DEFAULT_MODEL_REVISION = "unversioned";
 

@@ -116,6 +116,12 @@ export const NOTICE_ACK_TOLERANCE_MS = 250;
  */
 export const PLAYBACK_BACKSTOP_MARGIN_MS = 3000;
 
+/**
+ * Throwaway user message for the notice-time LLM warmup. The request is
+ * aborted at the first token and never touches history, TTS or storage.
+ */
+export const LLM_WARMUP_USER_MESSAGE = "Reply with OK.";
+
 /** Caller phrases that object to recording (AGENTS.md 9.1 rule 3, M22). */
 const RECORDING_OBJECTION_RE =
   /\b(don't|do not|stop|please stop)\s+record(ing)?\b|\bno\s+recording\b|\b(stop|turn off)\s+(the\s+)?recording\b/i;
