@@ -15,12 +15,15 @@ const tenantIdSchema = z.string().uuid();
  * Tenant-scoped database access. Every tenant query runs inside `withTenant`,
  * which opens a transaction and sets `app.tenant_id` so RLS policies apply.
  * With no tenant set the app role sees zero rows (verified by leak tests).
+ *
+ * M23: the raw pool/client stay private — only `withTenant` (tenant-scoped)
+ * and `checkConnection` (readiness ping) are available to callers.
  */
 @Injectable()
 export class DbService implements OnModuleDestroy {
   constructor(
-    readonly pool: Pool,
-    readonly db: AppDb,
+    private readonly pool: Pool,
+    private readonly db: AppDb,
   ) {}
 
   async withTenant<T>(tenantId: string, fn: (tx: TenantTx) => Promise<T>): Promise<T> {

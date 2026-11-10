@@ -29,7 +29,7 @@ export const DB = Symbol("DB");
       useFactory: (pool: Pool, db: AppDb): DbService => new DbService(pool, db),
     },
   ],
-  exports: [DB_POOL, DB, DbService],
+  exports: [DbService],
 })
 export class DbModule {
   constructor(@Inject(DB_POOL) pool: Pool) {
