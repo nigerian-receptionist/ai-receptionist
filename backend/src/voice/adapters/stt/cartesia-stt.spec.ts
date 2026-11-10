@@ -11,12 +11,12 @@ class FakeWs extends EventEmitter {
   readonly sent: unknown[] = [];
   failSend = false;
 
-  override send(data: unknown): void {
+  send(data: unknown): void {
     if (this.failSend) throw new Error("socket send failed");
     this.sent.push(data);
   }
 
-  override close(): void {
+  close(): void {
     this.readyState = WebSocket.CLOSED;
   }
 
