@@ -1,12 +1,4 @@
-import {
-  BadRequestException,
-  Controller,
-  Get,
-  NotFoundException,
-  Param,
-  Query,
-  UseGuards,
-} from "@nestjs/common";
+import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
 import { desc, eq, lt } from "drizzle-orm";
 import { z } from "zod";
 
@@ -14,6 +6,7 @@ import { DevAuthGuard } from "../auth/dev-auth.guard";
 import type { Principal as DevPrincipal } from "../auth/dev-auth";
 import { Principal } from "../auth/principal";
 import { decodeCursor, encodeCursor } from "../common/cursor";
+import { InvalidCursorError, NotFoundError } from "../common/errors";
 import { DbService } from "../db/db.service";
 import { interactions, turns, type InteractionRow, type TurnRow } from "../db/schema";
 import { toPublicId, toRawId } from "./ids";
@@ -79,7 +72,7 @@ export class InteractionsController {
   async list(@Principal() principal: DevPrincipal, @Query() query: unknown) {
     const { limit, cursor } = listQuerySchema.parse(query);
     const decoded = cursor === undefined ? null : decodeCursor(cursor);
-    if (cursor !== undefined && decoded === null) throw new BadRequestException("Invalid cursor");
+    if (cursor !== undefined && decoded === null) throw new InvalidCursorError();
 
     const rows = await this.db.withTenant(principal.tenantId, async (tx) =>
       tx
@@ -101,12 +94,8 @@ export class InteractionsController {
   @Get(":id")
   async getOne(@Principal() principal: DevPrincipal, @Param() params: unknown) {
     const { id } = idParamSchema.parse(params);
-    let rawId: string;
-    try {
-      rawId = toRawId(id, "int");
-    } catch {
-      throw new BadRequestException("Invalid interaction id");
-    }
+    // toRawId throws InvalidIdError (400 invalid-id) on malformed ids.
+    const rawId = toRawId(id, "int");
 
     const result = await this.db.withTenant(principal.tenantId, async (tx) => {
       const found = await tx
@@ -124,7 +113,8 @@ export class InteractionsController {
       return { interaction, turnRows };
     });
 
-    if (result === null) throw new NotFoundException("Interaction not found");
+    // Cross-tenant and missing ids are indistinguishable: 404 not-found.
+    if (result === null) throw new NotFoundError("interaction");
     return { ...toInteractionDto(result.interaction), turns: result.turnRows.map(toTurnDto) };
   }
 }
