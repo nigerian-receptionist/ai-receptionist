@@ -36,6 +36,14 @@ export interface VoiceSessionConfig {
   noticeAckTimeoutMs: number;
   /** M28: LLM-stall delay before a terminal-complete sentence starts TTS. */
   sentenceIdleFlushMs: number;
+  /** F4 cost caps (env VOICE_MAX_*): agent turns, turn audio, session length. */
+  maxTurns: number;
+  maxTurnAudioS: number;
+  maxSessionS: number;
+  /** Inbound audio budget per 1s window (nominal 16 kHz s16 mono is 32000). */
+  maxBytesPerSec: number;
+  /** Caller transcript chars sent to the LLM (the full text is still stored). */
+  maxTranscriptChars: number;
 }
 
 export const DEFAULT_VOICE_SESSION_CONFIG: VoiceSessionConfig = {
@@ -46,6 +54,11 @@ export const DEFAULT_VOICE_SESSION_CONFIG: VoiceSessionConfig = {
   silenceEndAfterMs: 20000,
   noticeAckTimeoutMs: 30000,
   sentenceIdleFlushMs: 120,
+  maxTurns: 60,
+  maxTurnAudioS: 30,
+  maxSessionS: 900,
+  maxBytesPerSec: 64000,
+  maxTranscriptChars: 2000,
 };
 
 export interface VoiceSessionDeps {
@@ -93,6 +106,12 @@ const RECORDING_OBJECTION_RE =
 /** Defensive cap on tracked utterances; oldest done entries are evicted first. */
 const MAX_TRACKED_UTTERANCES = 100;
 
+/** Nominal inbound rate: 16 kHz s16 mono. */
+const INPUT_BYTES_PER_SEC = 32000;
+
+/** Sustained flood cutoff, as a multiple of one second of byte budget. */
+const FLOOD_CUTOFF_WINDOWS = 3;
+
 /**
  * One voice conversation. Owns the AgentState machine, the turn loop, barge-in
  * and the notice handshake. Transport-agnostic: the gateway delivers parsed
@@ -132,6 +151,14 @@ export class VoiceSession {
   private activeRawReply = "";
   private ended = false;
   private endReason: "caller_hangup" | "agent_ended" | "error" | "timeout" | null = null;
+  /** F4: agent turns run, per-turn audio, rate window, session timer. */
+  private completedTurns = 0;
+  private turnAudioBytes = 0;
+  private turnAudioCapped = false;
+  private rateWindowStartMs: number | null = null;
+  private rateWindowBytes = 0;
+  private droppedBytes = 0;
+  private maxSessionTimer: NodeJS.Timeout | null = null;
 
   constructor(deps: VoiceSessionDeps) {
     this.deps = deps;
@@ -182,6 +209,43 @@ export class VoiceSession {
   handleAudio(pcm: Buffer): void {
     if (this.ended || this.interactionId === null) return;
     if (this.state !== "listening" && this.state !== "thinking" && this.state !== "speaking") return;
+    // F4: per-second byte budget; over-budget frames are dropped, and a
+    // sustained flood ends the session (bounds hosted STT spend).
+    const now = performance.now();
+    if (this.rateWindowStartMs === null || now - this.rateWindowStartMs >= 1000) {
+      this.rateWindowStartMs = now;
+      this.rateWindowBytes = 0;
+    }
+    if (this.rateWindowBytes + pcm.length > this.deps.config.maxBytesPerSec) {
+      this.droppedBytes += pcm.length;
+      this.deps.log({
+        msg: "session.audio_rate_limited",
+        droppedBytes: this.droppedBytes,
+        budget: this.deps.config.maxBytesPerSec,
+      });
+      if (this.droppedBytes > this.deps.config.maxBytesPerSec * FLOOD_CUTOFF_WINDOWS) {
+        this.deps.log({ msg: "session.audio_flood", droppedBytes: this.droppedBytes });
+        void this.endSession("agent_ended", {
+          fatal: { code: "internal", message: "Audio rate limit exceeded; ending the call." },
+        });
+      }
+      return;
+    }
+    this.rateWindowBytes += pcm.length;
+    // F4: a single turn's audio is capped; the excess is dropped (the turn
+    // finalizes short) but the session survives.
+    this.turnAudioBytes += pcm.length;
+    if (this.turnAudioBytes > this.deps.config.maxTurnAudioS * INPUT_BYTES_PER_SEC) {
+      if (!this.turnAudioCapped) {
+        this.turnAudioCapped = true;
+        this.deps.log({
+          msg: "session.turn_audio_capped",
+          turnAudioBytes: this.turnAudioBytes,
+          maxTurnAudioS: this.deps.config.maxTurnAudioS,
+        });
+      }
+      return;
+    }
     this.sttSession?.sendAudio(pcm);
   }
 
@@ -224,6 +288,17 @@ export class VoiceSession {
       llmModel: this.deps.llm.model,
     });
     this.setState("notice");
+    // F4: maximum call duration (AGENTS.md 10.3), the backstop behind every
+    // other cap. Cleared in endSession.
+    this.maxSessionTimer = setTimeout(() => {
+      this.maxSessionTimer = null;
+      if (this.ended) return;
+      this.deps.log({ msg: "session.duration_capped", maxSessionS: this.deps.config.maxSessionS });
+      void this.endSession("agent_ended", {
+        fatal: { code: "internal", message: "This call has reached its maximum length; ending now." },
+      });
+    }, this.deps.config.maxSessionS * 1000);
+    this.maxSessionTimer.unref?.();
     // M30: overlap the TTS connect with the disclosure REST render (at most 2
     // concurrent Cartesia calls on this plan). STT connects while the notice
     // plays and is awaited lazily on the first turn instead of blocking
@@ -462,6 +537,9 @@ export class VoiceSession {
   private handleSpeechStarted(): void {
     this.silencePrompted = false;
     this.clearSilenceTimer();
+    // F4: new turn, new audio budget.
+    this.turnAudioBytes = 0;
+    this.turnAudioCapped = false;
     if (this.currentUtteranceId) {
       // Covers speaking/thinking and the M5 playout tail (listening with
       // agent audio still unacked): cancel and truncate to what was heard.
@@ -483,6 +561,18 @@ export class VoiceSession {
   private async handleSpeechEnded(): Promise<void> {
     this.silencePrompted = false;
     if (this.state !== "listening" || !this.ttsSession) return;
+    // F4: hard stop on agent turns (bounds hosted LLM/TTS spend per session).
+    if (this.completedTurns >= this.deps.config.maxTurns) {
+      this.deps.log({
+        msg: "session.turns_capped",
+        completedTurns: this.completedTurns,
+        maxTurns: this.deps.config.maxTurns,
+      });
+      await this.endSession("agent_ended", {
+        fatal: { code: "internal", message: "This call has reached its turn limit; ending now." },
+      });
+      return;
+    }
     const tSpeechEnded = performance.now();
     const turnId = randomUUID();
     const myTurn = ++this.turnSeq;
@@ -529,7 +619,19 @@ export class VoiceSession {
       // runs concurrently with the LLM/TTS pipeline and lands before the
       // agent write (ordering by seq). Errors surface after the pipeline.
       const agent = this.agent as NonNullable<typeof this.agent>;
-      this.history.push({ role: "user", content: callerText });
+      // F4: bound LLM input; the full transcript is still stored for audit.
+      const llmText =
+        callerText.length > this.deps.config.maxTranscriptChars
+          ? callerText.slice(0, this.deps.config.maxTranscriptChars)
+          : callerText;
+      if (llmText !== callerText) {
+        this.deps.log({
+          msg: "session.transcript_capped",
+          chars: callerText.length,
+          maxTranscriptChars: this.deps.config.maxTranscriptChars,
+        });
+      }
+      this.history.push({ role: "user", content: llmText });
       this.trimHistory();
       this.seq += 1;
       const callerSeq = this.seq;
@@ -553,6 +655,7 @@ export class VoiceSession {
               callerWriteError = error;
             });
       if (myTurn !== this.turnSeq || this.ended) return;
+      this.completedTurns += 1;
       await this.runAgentTurn(turnId, myTurn, tSpeechEnded, tSttFinal, timings, {
         done: callerWriteDone,
         error: () => callerWriteError,
@@ -970,6 +1073,8 @@ export class VoiceSession {
     this.turnSeq += 1;
     this.clearNoticeTimer();
     this.clearSilenceTimer();
+    if (this.maxSessionTimer) clearTimeout(this.maxSessionTimer);
+    this.maxSessionTimer = null;
     this.llmAbort?.abort();
     this.ttsAbort?.abort();
     if (opts.fatal && !opts.quiet) {

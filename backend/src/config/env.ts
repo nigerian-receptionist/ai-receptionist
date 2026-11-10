@@ -43,6 +43,13 @@ export const envSchema = z.object({
 
   /** End-of-turn silence the browser VAD waits for, in ms (AGENTS.md 10.3). */
   ENDPOINTING_SILENCE_MS: z.coerce.number().int().positive().default(600),
+
+  /** F4 per-session cost caps (agent turns, turn audio, call length, byte rate, transcript). */
+  VOICE_MAX_TURNS: z.coerce.number().int().positive().default(60),
+  VOICE_MAX_TURN_AUDIO_S: z.coerce.number().int().positive().default(30),
+  VOICE_MAX_SESSION_S: z.coerce.number().int().positive().default(900),
+  VOICE_MAX_BYTES_PER_SEC: z.coerce.number().int().positive().default(64000),
+  VOICE_MAX_TRANSCRIPT_CHARS: z.coerce.number().int().positive().default(2000),
 });
 
 export type Env = z.infer<typeof envSchema>;

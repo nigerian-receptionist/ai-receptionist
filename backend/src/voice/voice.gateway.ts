@@ -142,6 +142,11 @@ export class VoiceGateway implements OnGatewayConnection, OnGatewayDisconnect, O
         ...DEFAULT_VOICE_SESSION_CONFIG,
         defaultVoiceId: this.env.TTS_VOICE,
         outputSampleRate: this.env.TTS_SAMPLE_RATE,
+        maxTurns: this.env.VOICE_MAX_TURNS,
+        maxTurnAudioS: this.env.VOICE_MAX_TURN_AUDIO_S,
+        maxSessionS: this.env.VOICE_MAX_SESSION_S,
+        maxBytesPerSec: this.env.VOICE_MAX_BYTES_PER_SEC,
+        maxTranscriptChars: this.env.VOICE_MAX_TRANSCRIPT_CHARS,
       },
       send: (message: ServerMessage) => {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));

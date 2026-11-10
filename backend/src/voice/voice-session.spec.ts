@@ -308,6 +308,11 @@ function makeHarness(opts: {
       silenceEndAfterMs: 60_000,
       noticeAckTimeoutMs: 5000,
       sentenceIdleFlushMs: 120,
+      maxTurns: 60,
+      maxTurnAudioS: 30,
+      maxSessionS: 900,
+      maxBytesPerSec: 64000,
+      maxTranscriptChars: 2000,
       ...opts.config,
     },
     send: (message) => sent.push(message),
@@ -995,6 +1000,109 @@ describe("VoiceSession", () => {
     expect(h.session.currentState).toBe("listening");
     await vi.waitFor(() => expect(h.closed).toHaveLength(1));
     expect(h.store.interactions.get(h.interactionId())?.endReason).toBe("timeout");
+  });
+
+  it("ends the session after maxTurns agent turns (F4)", async () => {
+    const h = makeHarness({
+      sttFinals: ["first question.", "second question."],
+      llmReplies: ["First answer.", "Second answer."],
+      config: { maxTurns: 1 },
+    });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+    expect(h.llm.seenMessages).toHaveLength(1);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 200 });
+    await vi.waitFor(() => expect(h.closed).toHaveLength(1));
+    expect(h.closed[0]).toMatchObject({ code: 1000, reason: "agent_ended" });
+    expect(h.llm.seenMessages).toHaveLength(1);
+    const fatal = h.sent.find((m) => m.type === "error" && (m as { fatal?: boolean }).fatal === true);
+    expect(fatal).toMatchObject({ code: "internal" });
+    expect(h.logs.some((l) => l.msg === "session.turns_capped")).toBe(true);
+  });
+
+  it("drops turn audio past maxTurnAudioS but keeps the session (F4)", async () => {
+    const h = makeHarness({
+      sttFinals: ["short question."],
+      llmReplies: ["Short answer."],
+      config: { maxTurnAudioS: 1 },
+    });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_started", atMs: 0 });
+    h.session.handleAudio(Buffer.alloc(32000));
+    h.session.handleAudio(Buffer.alloc(640));
+    expect(h.stt.sessions[0]?.audioBytes).toBe(32000);
+    expect(h.closed).toHaveLength(0);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+    expect(h.session.currentState).toBe("listening");
+    expect(h.logs.some((l) => l.msg === "session.turn_audio_capped")).toBe(true);
+  });
+
+  it("ends the session at maxSessionS (F4)", async () => {
+    const h = makeHarness({ config: { maxSessionS: 1 } });
+    await completeNotice(h);
+    await vi.waitFor(() => expect(h.closed).toHaveLength(1), { timeout: 5000 });
+    expect(h.closed[0]).toMatchObject({ code: 1000, reason: "agent_ended" });
+    expect(h.logs.some((l) => l.msg === "session.duration_capped")).toBe(true);
+  }, 10000);
+
+  it("drops inbound audio over the bytes/sec budget, ends on sustained flood (F4)", async () => {
+    const h = makeHarness({ config: { maxBytesPerSec: 640 } });
+    await completeNotice(h);
+    h.session.handleAudio(Buffer.alloc(640));
+    h.session.handleAudio(Buffer.alloc(640));
+    expect(h.stt.sessions[0]?.audioBytes).toBe(640);
+    expect(h.closed).toHaveLength(0);
+    // Sustained flood (>3s-equivalent dropped) ends the session.
+    for (let i = 0; i < 5; i += 1) h.session.handleAudio(Buffer.alloc(640));
+    await vi.waitFor(() => expect(h.closed).toHaveLength(1));
+    expect(h.closed[0]).toMatchObject({ reason: "agent_ended" });
+    expect(h.logs.some((l) => l.msg === "session.audio_flood")).toBe(true);
+  });
+
+  it("F7: fallback failure sends a generic fatal, vendor detail stays server-side", async () => {
+    const h = makeHarness({ sttFinals: ["hello?"], llmReplies: ["Hi."] });
+    await completeNotice(h);
+    // The LLM blows up mid-turn and the hold-block render fails too.
+    vi.spyOn(h.llm, "streamChat").mockImplementation(async function* () {
+      throw new Error("meta 500 quota exploded");
+      yield { kind: "delta", text: "unreached" } as never;
+    });
+    const render = h.blocks.render.bind(h.blocks);
+    vi.spyOn(h.blocks, "render").mockImplementation(
+      (block: BlockDefinition, opts: { orgName: string; voiceId: string }) => {
+        if (block.id === "hold") return Promise.reject(new Error("cartesia 503 overloaded"));
+        return render(block, opts);
+      },
+    );
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+    await vi.waitFor(() => expect(h.closed).toHaveLength(1));
+    const fatal = h.sent.find((m) => m.type === "error" && (m as { fatal?: boolean }).fatal === true);
+    expect(fatal).toMatchObject({ fatal: true, code: "internal" });
+    const message = (fatal as { message?: string }).message ?? "";
+    expect(message).not.toContain("quota");
+    expect(message).not.toContain("503");
+    expect(message).not.toContain("cartesia");
+    expect(h.logs.find((l) => l.msg === "session.fallback_failed")).toMatchObject({
+      error: expect.stringContaining("503"),
+    });
+  });
+
+  it("truncates long transcripts for the LLM but stores the full text (F4)", async () => {
+    const long = "word ".repeat(600);
+    const h = makeHarness({
+      sttFinals: [long],
+      llmReplies: ["Noted."],
+      config: { maxTranscriptChars: 100 },
+    });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+    const userMsg = h.llm.seenMessages[0]?.find((m) => m.role === "user");
+    expect(userMsg?.content).toHaveLength(100);
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns[0]?.text).toBe(long.trim());
+    const final = h.sent.find((m) => m.type === "transcript.final");
+    expect(final).toMatchObject({ text: long.trim() });
+    expect(h.logs.some((l) => l.msg === "session.transcript_capped")).toBe(true);
   });
 });
 
