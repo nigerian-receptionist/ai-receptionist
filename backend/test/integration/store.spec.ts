@@ -10,19 +10,21 @@ import { createTenantAgent, createTenantWithAgent, createTestDb, deleteTenantDat
 
 describe("DrizzleInteractionStore round-trip (real Postgres, app role)", () => {
   let pool: Pool;
+  let owner: Pool;
   let service: DbService;
   let store: DrizzleInteractionStore;
   let tenantId: string;
   let agentId: string;
 
   beforeAll(async () => {
-    ({ pool, service, store } = createTestDb());
+    ({ pool, owner, service, store } = createTestDb());
     ({ tenantId, agentId } = await createTenantWithAgent(service, "Store Test Ltd"));
   });
 
   afterAll(async () => {
-    await deleteTenantData(service, tenantId).catch(() => undefined);
+    await deleteTenantData(owner, tenantId).catch(() => undefined);
     await pool.end().catch(() => undefined);
+    await owner.end().catch(() => undefined);
   });
 
   it("loads the agent with the org name, by default and by id", async () => {
@@ -141,7 +143,7 @@ describe("DrizzleInteractionStore round-trip (real Postgres, app role)", () => {
         }),
       ).rejects.toThrow("agent not found");
     } finally {
-      await deleteTenantData(service, other.tenantId).catch(() => undefined);
+      await deleteTenantData(owner, other.tenantId).catch(() => undefined);
     }
   });
 

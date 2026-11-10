@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   doublePrecision,
   index,
   integer,
@@ -10,6 +11,7 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /**
  * Multi-tenant tables (AGENTS.md 8.1/8.2). Every table carries `tenant_id` and
@@ -26,14 +28,18 @@ export const tenants = pgTable(
   {
     id: uuid("id").primaryKey(),
     // Mirrors `id` so every tenant table has a uniform `tenant_id` column for
-    // RLS policies. Always insert with tenantId === id.
+    // RLS policies. The CHECK below enforces tenantId === id at the database
+    // level (a tenant row in the wrong partition breaks RLS assumptions).
     tenantId: uuid("tenant_id").notNull(),
     name: text("name").notNull(),
     settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tenants_tenant_created_idx").on(t.tenantId, t.createdAt)],
+  (t) => [
+    index("tenants_tenant_created_idx").on(t.tenantId, t.createdAt),
+    check("tenants_tenant_id_is_id", sql`${t.tenantId} = ${t.id}`),
+  ],
 );
 
 export const agents = pgTable(

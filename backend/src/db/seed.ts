@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 import { Client } from "pg";
+import { z } from "zod";
 
 /** Fixed seed ids so `db:seed` is idempotent. Tenant matches DEV_TENANT_ID. */
 export const SEED_TENANT_ID = "0195f3a0-0000-7000-8000-000000000001";
@@ -18,6 +19,9 @@ const SEED_PERSONA_PROMPT =
 async function main(): Promise<void> {
   const url = process.env.DATABASE_MIGRATION_URL;
   if (!url) throw new Error("DATABASE_MIGRATION_URL is required for db:seed");
+  if (!z.string().url().safeParse(url).success) {
+    throw new Error("DATABASE_MIGRATION_URL must be a valid URL for db:seed");
+  }
   const tenantId = process.env.DEV_TENANT_ID ?? SEED_TENANT_ID;
   const client = new Client({ connectionString: url });
   await client.connect();
