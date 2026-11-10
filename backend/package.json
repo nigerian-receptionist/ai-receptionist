@@ -15,7 +15,8 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "db:setup": "pnpm db:migrate && pnpm db:seed",
-    "voice:smoke": "tsx --env-file=.env scripts/voice-smoke.ts"
+    "voice:smoke": "tsx --env-file=.env scripts/voice-smoke.ts",
+    "voice:silence-check": "tsx --env-file=.env scripts/silence-check.ts"
   },
   "dependencies": {
     "@nestjs/common": "12.4.2",
