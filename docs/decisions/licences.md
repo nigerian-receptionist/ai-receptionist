@@ -41,3 +41,27 @@ The direct live-demo libraries are license-checked. Run an automated license
 scan over all transitive locked dependencies before production adoption.
 LGPL or other section-19 ask-first packages must not be introduced without an
 ADR.
+
+## Backend data layer (checked 2026-11-10, `backend/`)
+
+| Component | Version | License | Commercial-use status and notes | Evidence |
+|---|---|---|---|---|
+| drizzle-orm | 0.45.4 | Apache-2.0 | Allowed; ORM with SQL migrations, `pg` driver | [npm metadata](https://www.npmjs.com/package/drizzle-orm) |
+| drizzle-kit | 0.31.11 | MIT | Allowed; migration generator (dev only) | [npm metadata](https://www.npmjs.com/package/drizzle-kit) |
+| pg | 8.23.1 | MIT | Allowed; Postgres client | [npm metadata](https://www.npmjs.com/package/pg) |
+| @types/pg | 8.23.1 | MIT | Allowed; types (dev only) | [npm metadata](https://www.npmjs.com/package/@types/pg) |
+| libphonenumber-js | 1.13.15 | MIT | Allowed; E.164 normalisation | [npm metadata](https://www.npmjs.com/package/libphonenumber-js) |
+| dotenv | 16.4.7 | BSD-2-Clause | Allowed; local `.env` loading | [npm metadata](https://www.npmjs.com/package/dotenv) |
+| undici | 6.29.1 | MIT | Allowed; keep-alive HTTP dispatcher for the LLM adapter (backend) | [npm metadata](https://www.npmjs.com/package/undici) |
+
+## Realtime voice loop additions (2026-11-10, feat/realtime-voice)
+
+| Component | Version (pinned) | License | Commercial-use status and notes | Evidence |
+|---|---|---|---|---|
+| @ricky0123/vad-web | 0.0.31 (2026-09-12) | ISC | Allowed; browser Silero VAD wrapper. Ships `silero_vad_v5.onnx` + worklet, served locally from `public/vad/` (no CDN at runtime). | [npm metadata](https://www.npmjs.com/package/@ricky0123/vad-web) |
+| onnxruntime-web | 1.31.1 (2026-10-26) | MIT | Allowed; VAD inference runtime. Only `ort-wasm-simd-threaded.{mjs,wasm}` are served locally; requires the COOP/COEP headers set in `frontend/next.config.ts`. | [npm metadata](https://www.npmjs.com/package/onnxruntime-web) |
+| Cartesia STT/TTS APIs | ink-2, sonic-3.6 | Hosted service (metered) | Approved by ADR 0007 for the realtime loop only; data-transfer terms must be confirmed with counsel before real contact data is used. Seun voice commercial origin still unconfirmed. | [ADR 0007](./0007-hosted-speech-and-llm.md) |
+| Muse Spark LLM API | muse-spark-1.3-contributor | Hosted service (metered) | Approved by ADR 0007 behind the OpenAI-compatible adapter; same data-transfer caveat as Cartesia. | [ADR 0007](./0007-hosted-speech-and-llm.md) |
+| @nestjs/testing | 12.4.2 (dev only) | MIT | Allowed; HTTP-level API tests. | [npm metadata](https://www.npmjs.com/package/@nestjs/testing) |
+| supertest | 7.3.2 (dev only) | MIT | Allowed; HTTP-level API tests. | [npm metadata](https://www.npmjs.com/package/supertest) |
+| @types/supertest | 7.2.1 (dev only) | MIT | Allowed; types for supertest. | [npm metadata](https://www.npmjs.com/package/@types/supertest) |

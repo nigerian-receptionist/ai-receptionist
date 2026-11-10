@@ -1,0 +1,1 @@
+ALTER TABLE "tenants" ADD CONSTRAINT "tenants_tenant_id_is_id" CHECK ("tenants"."tenant_id" = "tenants"."id");
