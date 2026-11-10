@@ -121,6 +121,7 @@ export class VoiceSession {
   private recordingObjection = false;
   private noticeTimer: NodeJS.Timeout | null = null;
   private silenceTimer: NodeJS.Timeout | null = null;
+  private silenceFallbackTimer: NodeJS.Timeout | null = null;
   private silencePrompted = false;
   private starting = false;
   private activeTimings: TurnTimingsMs | null = null;
@@ -784,7 +785,9 @@ export class VoiceSession {
     this.clearSilenceTimer();
     const afterMs = this.silencePrompted ? this.deps.config.silenceEndAfterMs : this.deps.config.silencePromptAfterMs;
     this.silenceTimer = setTimeout(() => {
-      void this.handleSilenceTimeout();
+      void this.handleSilenceTimeout().catch((error: unknown) =>
+        this.deps.log({ msg: "silence.timeout_failed", error: errorMessage(error) }),
+      );
     }, afterMs);
     this.silenceTimer.unref?.();
   }
@@ -792,6 +795,8 @@ export class VoiceSession {
   private clearSilenceTimer(): void {
     if (this.silenceTimer) clearTimeout(this.silenceTimer);
     this.silenceTimer = null;
+    if (this.silenceFallbackTimer) clearTimeout(this.silenceFallbackTimer);
+    this.silenceFallbackTimer = null;
   }
 
   private async handleSilenceTimeout(): Promise<void> {
@@ -808,13 +813,17 @@ export class VoiceSession {
         this.setState("speaking");
         await this.playBlock("silence-prompt", prompt);
         // If the client never acks, fall back to listening so the end timer runs.
-        setTimeout(() => {
+        // Tracked so barge-in and teardown clear it (no orphaned timers).
+        if (this.silenceFallbackTimer) clearTimeout(this.silenceFallbackTimer);
+        this.silenceFallbackTimer = setTimeout(() => {
+          this.silenceFallbackTimer = null;
           if (!this.ended && this.currentUtteranceId === "silence-prompt") {
             this.currentUtteranceId = null;
             this.setState("listening");
             this.armSilenceTimer();
           }
-        }, 15000).unref?.();
+        }, 15000);
+        this.silenceFallbackTimer.unref?.();
       } catch (error) {
         this.deps.log({ msg: "silence.prompt_failed", error: errorMessage(error) });
         this.armSilenceTimer();

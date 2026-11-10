@@ -108,6 +108,7 @@ class FakeTtsSession implements TtsStreamSession {
    * speak parks after the first audio chunk until the gate opens, so tests can
    * interrupt deterministically mid-utterance. `gateFor` gates per text.
    */
+  private readonly activeContexts = new Set<string>();
   constructor(
     private readonly canned: Map<string, FakeUtterance> = new Map(),
     private gate: Promise<void> | null = null,
@@ -119,6 +120,8 @@ class FakeTtsSession implements TtsStreamSession {
     opts: { contextId: string; signal?: AbortSignal },
   ): AsyncIterable<TtsStreamEvent> {
     this.spokenLog?.push(text);
+    if (this.activeContexts.has(opts.contextId)) throw new Error("duplicate tts context id");
+    this.activeContexts.add(opts.contextId);
     try {
       const found = this.canned.get(text);
       const pcm = found?.pcm ?? makePcm(0.3);
@@ -148,6 +151,8 @@ class FakeTtsSession implements TtsStreamSession {
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") this.abortedContexts.push(opts.contextId);
       throw error;
+    } finally {
+      this.activeContexts.delete(opts.contextId);
     }
     this.completedContexts.push(opts.contextId);
   }

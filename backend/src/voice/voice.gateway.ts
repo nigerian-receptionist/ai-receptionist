@@ -136,8 +136,13 @@ export class VoiceGateway implements OnGatewayConnection, OnGatewayDisconnect, O
           defaultVoiceId: this.env.TTS_VOICE,
         }),
         join(__dirname, "..", "..", ".cache", "blocks"),
+        { outputSampleRate: this.env.TTS_SAMPLE_RATE },
       ),
-      config: { ...DEFAULT_VOICE_SESSION_CONFIG, defaultVoiceId: this.env.TTS_VOICE },
+      config: {
+        ...DEFAULT_VOICE_SESSION_CONFIG,
+        defaultVoiceId: this.env.TTS_VOICE,
+        outputSampleRate: this.env.TTS_SAMPLE_RATE,
+      },
       send: (message: ServerMessage) => {
         if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
       },

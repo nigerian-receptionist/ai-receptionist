@@ -86,11 +86,13 @@ export function renderBlockText(block: BlockDefinition, variables: Record<string
 export class BlockRenderer {
   private readonly tts: TextToSpeech;
   private readonly cacheDir: string;
+  private readonly outputSampleRate: number;
   private readonly inFlight = new Map<string, Promise<RenderedBlock>>();
 
-  constructor(tts: TextToSpeech, cacheDir: string) {
+  constructor(tts: TextToSpeech, cacheDir: string, opts: { outputSampleRate?: number } = {}) {
     this.tts = tts;
     this.cacheDir = cacheDir;
+    this.outputSampleRate = opts.outputSampleRate ?? 24000;
   }
 
   async render(
@@ -110,7 +112,14 @@ export class BlockRenderer {
     });
     const cached = this.readCache(hash);
     if (cached) {
-      return { block, text, hash, pcmS16le: cached, sampleRate: 24000, durationS: cached.length / 2 / 24000 };
+      return {
+        block,
+        text,
+        hash,
+        pcmS16le: cached,
+        sampleRate: this.outputSampleRate,
+        durationS: cached.length / 2 / this.outputSampleRate,
+      };
     }
     const existing = this.inFlight.get(hash);
     if (existing) return existing;
@@ -120,8 +129,14 @@ export class BlockRenderer {
         language: block.language,
         tone,
         speed,
+        sampleRate: this.outputSampleRate,
       });
-      if (result.sampleRate !== 24000) throw new Error(`unexpected block sample rate ${result.sampleRate}`);
+      if (result.sampleRate !== this.outputSampleRate) {
+        throw new Error(
+          `unexpected block sample rate ${result.sampleRate} (expected ${this.outputSampleRate})`,
+        );
+      }
+      if (result.pcmS16le.length % 2 !== 0) throw new Error("block pcm must be even-length");
       this.writeCache(hash, result.pcmS16le);
       return {
         block,
@@ -144,7 +159,10 @@ export class BlockRenderer {
     try {
       const path = join(this.cacheDir, `${hash}.pcm`);
       if (!existsSync(path)) return null;
-      return readFileSync(path);
+      const pcm = readFileSync(path);
+      // Corrupt (odd-length) cache entries are treated as a miss and re-rendered.
+      if (pcm.length % 2 !== 0) return null;
+      return pcm;
     } catch {
       return null;
     }

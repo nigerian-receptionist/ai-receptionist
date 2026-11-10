@@ -118,7 +118,15 @@ export interface TextToSpeech {
    */
   synthesize(
     text: string,
-    opts: { voiceId: string; language: string; tone?: string; speed?: number; signal?: AbortSignal },
+    opts: {
+      voiceId: string;
+      language: string;
+      tone?: string;
+      speed?: number;
+      /** Requested output rate; implementations report the actual rate. */
+      sampleRate?: number;
+      signal?: AbortSignal;
+    },
   ): Promise<TtsResult>;
   startSession(opts: { sampleRate: number }): Promise<TtsStreamSession>;
 }
