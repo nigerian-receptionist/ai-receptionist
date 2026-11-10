@@ -7,26 +7,28 @@ import type {
   SpeechToText,
   SttStreamSession,
   TextToSpeech,
+  TtsReplyStream,
   TtsStreamSession,
   WordTiming,
 } from "./adapters/types";
+import { buildSttKeyterms } from "./adapters/stt/cartesia-stt";
 import {
-  ACK_BLOCKS,
   DISCLOSE_AI_BLOCK,
   HOLD_BLOCK,
   RECORDING_NOTICE_BLOCK,
   SILENCE_PROMPT_BLOCK,
-  type BlockDefinition,
   type BlockRenderer,
   type RenderedBlock,
 } from "./blocks/block-cache";
 import type { ClientMessage } from "./client-messages";
 import { normaliseForSpeech } from "./normalise";
+import { classifyCallerTurn, OPENERS, openerMessages, OpenerSelector } from "./openers";
 import type { AgentState, ServerMessage, TurnTimingsMs } from "./protocol";
 import { applySpeakPolicy } from "./speak-policy";
 import { VOICE_PROTOCOL_VERSION } from "./protocol";
 import { buildSystemPrompt, VOICE_SYSTEM_PROMPT_VERSION } from "./prompts/system";
 import { SentenceChunker } from "./sentence-chunker";
+import { ToneTagStripper, type ToneName } from "./tone";
 
 export interface VoiceSessionConfig {
   defaultVoiceId: string;
@@ -48,10 +50,10 @@ export interface VoiceSessionConfig {
   maxTranscriptChars: number;
   /** Throwaway prefix-matching LLM request while the notice plays (env LLM_WARMUP_ENABLED). */
   llmWarmupEnabled: boolean;
-  /** Play a pre-rendered ack when the first LLM token is slow (env ACK_ENABLED). */
-  ackEnabled: boolean;
-  /** First-token wait before the ack plays, in ms (env ACK_DELAY_MS). */
-  ackDelayMs: number;
+  /** Play a pre-rendered opener matched to the caller's words (env OPENER_ENABLED). */
+  openerEnabled: boolean;
+  /** Extra STT keyterms from env (STT_KEYTERMS); never caller data. */
+  sttKeytermsExtra: string[];
 }
 
 export const DEFAULT_VOICE_SESSION_CONFIG: VoiceSessionConfig = {
@@ -68,8 +70,8 @@ export const DEFAULT_VOICE_SESSION_CONFIG: VoiceSessionConfig = {
   maxBytesPerSec: 64000,
   maxTranscriptChars: 2000,
   llmWarmupEnabled: true,
-  ackEnabled: true,
-  ackDelayMs: 400,
+  openerEnabled: true,
+  sttKeytermsExtra: [],
 };
 
 export interface VoiceSessionDeps {
@@ -86,12 +88,12 @@ export interface VoiceSessionDeps {
   log: (fields: Record<string, unknown>) => void;
 }
 
-interface SentenceAudio {
+export interface SentenceAudio {
   /** Normalised (spoken) sentence text. */
   sentence: string;
+  /** Estimated share of the reply audio (proportional to text length). */
   audioBytes: number;
   durationS: number;
-  words: WordTiming[];
 }
 
 interface ActiveUtterance {
@@ -157,8 +159,14 @@ export class VoiceSession {
   private readonly deps: VoiceSessionDeps;
   private state: AgentState = "connecting";
   private interactionId: string | null = null;
-  private agent: { agentId: string; orgName: string; personaPrompt: string; voiceId: string; language: string } | null =
-    null;
+  private agent: {
+    agentId: string;
+    agentName: string;
+    orgName: string;
+    personaPrompt: string;
+    voiceId: string;
+    language: string;
+  } | null = null;
   private sttSession: SttStreamSession | null = null;
   private sttReady: Promise<SttStreamSession> | null = null;
   private ttsSession: TtsStreamSession | null = null;
@@ -178,16 +186,20 @@ export class VoiceSession {
   private noticeTimer: NodeJS.Timeout | null = null;
   private silenceTimer: NodeJS.Timeout | null = null;
   private silenceFallbackTimer: NodeJS.Timeout | null = null;
-  private ackTimer: NodeJS.Timeout | null = null;
-  private activeAckUtteranceId: string | null = null;
-  private activeAckFirstAudioMs: number | null = null;
-  /** Round-robin cursor over ACK_BLOCKS (never repeats the last ack). */
-  private ackCursor = 0;
+  /** Rotating opener picker (per-category cursors, never repeats the last). */
+  private readonly openerSelector = new OpenerSelector();
+  /** This turn's opener, if one played (kept until the turn fully resolves). */
+  private activeOpener: { utteranceId: string; text: string; durationMs: number } | null = null;
+  private activeOpenerHeard = false;
+  private activeOpenerFirstAudioMs: number | null = null;
   private playbackBackstopTimer: NodeJS.Timeout | null = null;
   private silencePrompted = false;
   private starting = false;
   private activeTimings: TurnTimingsMs | null = null;
   private activeRawReply = "";
+  /** Reply tone (from the LLM's tag) and word times (absolute over the reply). */
+  private activeTone: ToneName = "neutral";
+  private activeReplyWords: WordTiming[] = [];
   private ended = false;
   private endReason: "caller_hangup" | "agent_ended" | "error" | "timeout" | null = null;
   /** F4: agent turns run, per-turn audio, rate window, session timer. */
@@ -302,6 +314,7 @@ export class VoiceSession {
     const agent = await store.getAgentForSession(tenantId, agentId);
     this.agent = {
       agentId: agent.agentId,
+      agentName: agent.agentName,
       orgName: agent.orgName,
       personaPrompt: agent.personaPrompt,
       voiceId: agent.voiceId ?? this.deps.config.defaultVoiceId,
@@ -374,7 +387,17 @@ export class VoiceSession {
 
   /** Start an STT session; assigns it when ready, clears the promise on failure. */
   private connectStt(): Promise<SttStreamSession> {
-    const ready = this.deps.stt.startSession({ sampleRate: 16000, language: "en" });
+    // Keyterms bias recognition toward tenant names and Nigerian terms. They
+    // are set once per connection and never carry caller data.
+    const { terms, dropped } = buildSttKeyterms({
+      orgName: this.agent?.orgName,
+      agentName: this.agent?.agentName,
+      extra: this.deps.config.sttKeytermsExtra,
+    });
+    if (dropped > 0) {
+      this.deps.log({ msg: "stt.keyterms_truncated", dropped, kept: terms.length });
+    }
+    const ready = this.deps.stt.startSession({ sampleRate: 16000, language: "en", keyterms: terms });
     ready.then(
       (session) => {
         if (!this.ended && this.sttReady === ready) {
@@ -451,9 +474,20 @@ export class VoiceSession {
 
   private async preRenderBackgroundBlocks(): Promise<void> {
     const agent = this.agent as NonNullable<typeof this.agent>;
-    for (const block of [RECORDING_NOTICE_BLOCK, HOLD_BLOCK, SILENCE_PROMPT_BLOCK, ...ACK_BLOCKS]) {
+    for (const block of [RECORDING_NOTICE_BLOCK, HOLD_BLOCK, SILENCE_PROMPT_BLOCK]) {
       if (this.ended) return;
       await this.deps.blocks.render(block, { orgName: agent.orgName, voiceId: agent.voiceId });
+    }
+    // Openers render with their category tone (the tone is in the cache key).
+    for (const options of Object.values(OPENERS)) {
+      for (const option of options) {
+        if (this.ended) return;
+        await this.deps.blocks.render(option.block, {
+          orgName: agent.orgName,
+          voiceId: agent.voiceId,
+          tone: option.tone,
+        });
+      }
     }
   }
 
@@ -497,7 +531,7 @@ export class VoiceSession {
     this.trackUtterance(utteranceId, {
       id: utteranceId,
       sentences: [
-        { sentence: rendered.text, audioBytes: rendered.pcmS16le.length, durationS: rendered.durationS, words: [] },
+        { sentence: rendered.text, audioBytes: rendered.pcmS16le.length, durationS: rendered.durationS },
       ],
       playedMs: 0,
       done: false,
@@ -593,10 +627,11 @@ export class VoiceSession {
       }
       return;
     }
-    if (utteranceId === this.activeAckUtteranceId) {
-      // An ack is never the end of the turn: prune it without arming the
-      // silence window (that waits for the reply's own playback.done).
-      this.activeAckUtteranceId = null;
+    if (this.activeOpener !== null && utteranceId === this.activeOpener.utteranceId) {
+      // The opener is heard, but it never ends the turn: mark it (it joins
+      // the stored spoken text) and prune without arming the silence window
+      // (that waits for the reply's own playback.done).
+      this.activeOpenerHeard = true;
       this.utterances.delete(utteranceId);
       return;
     }
@@ -605,8 +640,12 @@ export class VoiceSession {
     if (this.currentUtteranceId === utteranceId) {
       this.currentUtteranceId = null;
       this.utterances.delete(utteranceId);
+      // The turn fully resolved: the opener record can go with it.
+      this.activeOpener = null;
+      this.activeOpenerHeard = false;
+      this.activeOpenerFirstAudioMs = null;
       // Heard-anchored silence window (AGENTS.md 10.3): the 8s clock starts
-      // when the caller heard the end, not at send-complete. Stale acks (the
+      // when the caller heard the end, not at send-complete. Stale dones (the
       // backstop already fired, a barge-in retired the turn, a newer turn
       // started) fall through to the no-op prune below.
       if (!this.ended && this.state === "listening") this.armSilenceTimer();
@@ -765,7 +804,7 @@ export class VoiceSession {
             });
       if (myTurn !== this.turnSeq || this.ended) return;
       this.completedTurns += 1;
-      await this.runAgentTurn(turnId, myTurn, tSpeechEnded, tSttFinal, timings, {
+      await this.runAgentTurn(turnId, myTurn, tSpeechEnded, tSttFinal, timings, callerText, {
         done: callerWriteDone,
         error: () => callerWriteError,
       });
@@ -781,6 +820,7 @@ export class VoiceSession {
     tSpeechEnded: number,
     tSttFinal: number,
     timings: TurnTimingsMs,
+    callerText: string,
     callerWrite: { done: Promise<void>; error: () => unknown },
   ): Promise<void> {
     const agent = this.agent as NonNullable<typeof this.agent>;
@@ -793,9 +833,11 @@ export class VoiceSession {
     this.ttsAbort = ttsAbort;
     this.activeTimings = timings;
     this.activeRawReply = "";
-    this.clearAckTimer();
-    this.activeAckUtteranceId = null;
-    this.activeAckFirstAudioMs = null;
+    this.activeTone = "neutral";
+    this.activeReplyWords = [];
+    this.activeOpener = null;
+    this.activeOpenerHeard = false;
+    this.activeOpenerFirstAudioMs = null;
     const utterance: ActiveUtterance = {
       id: turnId,
       sentences: [],
@@ -805,8 +847,43 @@ export class VoiceSession {
     };
     this.trackUtterance(turnId, utterance);
     this.currentUtteranceId = turnId;
-    const messages = this.buildMessages();
+    // The opener plays first, always (no timing condition): it is chosen
+    // deterministically from the caller's words and fully sent before the LLM
+    // starts, so the reply queues behind it with no overlap. The LLM is told
+    // what was said and continues from there.
+    let openerText = "";
+    if (this.deps.config.openerEnabled) {
+      const option = this.openerSelector.choose(classifyCallerTurn(callerText));
+      if (option !== null) {
+        try {
+          const rendered = await this.deps.blocks.render(option.block, {
+            orgName: agent.orgName,
+            voiceId: agent.voiceId,
+            tone: option.tone,
+          });
+          if (myTurn !== this.turnSeq || this.ended) return;
+          const openerUtteranceId = `opener-${turnId}`;
+          await this.playBlock(openerUtteranceId, rendered);
+          if (myTurn !== this.turnSeq || this.ended) return;
+          this.activeOpener = {
+            utteranceId: openerUtteranceId,
+            text: rendered.text,
+            durationMs: Math.round(rendered.durationS * 1000),
+          };
+          openerText = rendered.text;
+          const openerMs = Math.round(performance.now() - tSpeechEnded);
+          this.activeOpenerFirstAudioMs = openerMs;
+          this.deps.log({ msg: "opener.play", blockId: option.block.id, openerFirstAudioMs: openerMs, turnId });
+        } catch (error) {
+          // An opener must never break the turn: continue without one.
+          this.deps.log({ msg: "opener.render_failed", error: errorMessage(error) });
+        }
+      }
+    }
+    if (myTurn !== this.turnSeq || this.ended) return;
+    const messages = this.buildMessages(openerText);
     const chunker = new SentenceChunker();
+    const toneStrip = new ToneTagStripper();
     let rawReply = "";
     let llmFirstAt = 0;
     let usage: { in: number | null; out: number | null; reasoning: number | null } | undefined;
@@ -815,17 +892,73 @@ export class VoiceSession {
     let firstAudioSentAt = 0;
     let ttsStartAt = 0;
     let ttsDoneAt = 0;
-    let sentenceIndex = 0;
+    let ttsSentAt = 0;
+    // One TTS context for the whole reply (created lazily at the first push,
+    // when the tone tag has resolved). Audio arrives in push order; sentence
+    // durations are estimated from byte counts while word timestamps (absolute
+    // over the reply) refine barge-in truncation.
+    const replyState: { stream: TtsReplyStream | null; done: Promise<void> | null } = {
+      stream: null,
+      done: null,
+    };
+    const replyErrors: unknown[] = [];
+    let replyBytes = 0;
+    let firstPush = true;
+    const ensureReply = (): TtsReplyStream => {
+      if (replyState.stream) return replyState.stream;
+      ttsSentAt = performance.now();
+      const stream = ttsSession.speakReply({
+        voiceId: agent.voiceId,
+        language: "en",
+        tone: toneStrip.tone,
+        speed: 1.0,
+        contextId: turnId,
+        signal: ttsAbort.signal,
+      });
+      replyState.stream = stream;
+      replyState.done = (async (): Promise<void> => {
+        try {
+          for await (const event of stream.events()) {
+            if (myTurn !== this.turnSeq || this.ended) return;
+            if (event.kind === "audio") {
+              replyBytes += event.chunk.pcmS16le.length;
+              attributeReplyAudio(utterance.sentences, replyBytes, this.deps.config.outputSampleRate);
+              if (ttsFirstAt === 0) {
+                ttsFirstAt = performance.now();
+                timings.tts_first_audio = Math.round(ttsFirstAt - ttsSentAt);
+              }
+              this.deps.send({
+                type: "agent.audio",
+                utteranceId: turnId,
+                seq: audioSeq++,
+                pcmBase64: event.chunk.pcmS16le.toString("base64"),
+              });
+              if (firstAudioSentAt === 0) {
+                firstAudioSentAt = performance.now();
+                timings.end_to_first_audio = Math.round(firstAudioSentAt - tSpeechEnded);
+                this.setState("speaking");
+              }
+            } else if (event.kind === "timestamps") {
+              this.activeReplyWords.push(...event.words);
+            }
+          }
+        } catch (error) {
+          replyErrors.push(error);
+        }
+      })();
+      return stream;
+    };
     // M27: sentences queue onto a sequential chain instead of blocking the
     // LLM loop, so TTS for sentence N runs while the LLM keeps generating.
-    // Order is preserved; staleness is checked per task for barge-in.
+    // Order is preserved; staleness is checked per task for barge-in. Pushes
+    // onto the reply context must stay in sentence order.
     let speakChain = Promise.resolve();
     const speakErrors: unknown[] = [];
     const queueSentence = (sentence: string): void => {
       speakChain = speakChain.then(async () => {
         if (myTurn !== this.turnSeq || this.ended || speakErrors.length > 0) return;
         try {
-          await speakSentence(sentence);
+          pushSentence(sentence);
         } catch (error) {
           speakErrors.push(error);
         }
@@ -847,7 +980,7 @@ export class VoiceSession {
       }, this.deps.config.sentenceIdleFlushMs);
       idleTimer.unref?.();
     };
-    const speakSentence = async (sentence: string): Promise<void> => {
+    const pushSentence = (sentence: string): void => {
       if (myTurn !== this.turnSeq || this.ended) return;
       // F3/M19: screen the raw LLM sentence for sensitive values BEFORE
       // normalisation (which would expand digits into words) and synthesis.
@@ -861,51 +994,14 @@ export class VoiceSession {
       // F3: the client transcript gets the screened sentence, never raw LLM
       // deltas, so echoed PII never reaches the browser either.
       this.deps.send({ type: "agent.text", utteranceId: turnId, delta: `${policy.safe} `, kind: "speech" });
-      const contextId = `${turnId}:s${sentenceIndex++}`;
-      const ttsSentAt = performance.now();
-      // Tracked progressively so a mid-sentence barge-in still sees partial audio/words.
-      const entry: SentenceAudio = { sentence: spoken, audioBytes: 0, durationS: 0, words: [] };
-      utterance.sentences.push(entry);
-      let firstChunk = true;
-      for await (const event of ttsSession.speak(spoken, {
-        voiceId: agent.voiceId,
-        language: "en",
-        tone: "neutral",
-        speed: 1.0,
-        contextId,
-        signal: ttsAbort.signal,
-      })) {
-        if (myTurn !== this.turnSeq) return;
-        if (event.kind === "audio") {
-          entry.audioBytes += event.chunk.pcmS16le.length;
-          entry.durationS = entry.audioBytes / 2 / this.deps.config.outputSampleRate;
-          if (firstChunk) {
-            firstChunk = false;
-            if (ttsFirstAt === 0) {
-              ttsFirstAt = performance.now();
-              timings.tts_first_audio = Math.round(ttsFirstAt - ttsSentAt);
-            }
-          }
-          this.deps.send({
-            type: "agent.audio",
-            utteranceId: turnId,
-            seq: audioSeq++,
-            pcmBase64: event.chunk.pcmS16le.toString("base64"),
-          });
-          if (firstAudioSentAt === 0) {
-            firstAudioSentAt = performance.now();
-            timings.end_to_first_audio = Math.round(firstAudioSentAt - tSpeechEnded);
-            this.setState("speaking");
-          }
-        } else if (event.kind === "timestamps") {
-          entry.words.push(...event.words);
-        }
-      }
-      ttsDoneAt = performance.now();
+      utterance.sentences.push({ sentence: spoken, audioBytes: 0, durationS: 0 });
+      // Joining space: the concatenated pushes must form a valid transcript.
+      const pushText = firstPush ? spoken : ` ${spoken}`;
+      firstPush = false;
+      ensureReply().push(pushText);
     };
 
     try {
-      this.armAckTimer(myTurn, turnId, tSpeechEnded);
       for await (const event of this.deps.llm.streamChat(messages, { signal: llmAbort.signal })) {
         if (myTurn !== this.turnSeq || this.ended) return;
         if (event.kind === "usage") {
@@ -915,28 +1011,45 @@ export class VoiceSession {
         if (llmFirstAt === 0) {
           llmFirstAt = performance.now();
           timings.llm_first_token = Math.round(llmFirstAt - tSttFinal);
-          this.clearAckTimer();
         }
-        rawReply += event.text;
+        // The tone tag is stripped before chunking, TTS, history and storage:
+        // it is never spoken, shown or stored as text.
+        const clean = toneStrip.push(event.text);
+        rawReply += clean;
         this.activeRawReply = rawReply;
-        for (const sentence of chunker.push(event.text)) queueSentence(sentence);
+        this.activeTone = toneStrip.tone;
+        for (const sentence of chunker.push(clean)) queueSentence(sentence);
         if (myTurn !== this.turnSeq || this.ended) return;
         armIdle();
       }
       // M31: llm_total covers the LLM stream only, never queued TTS work.
       timings.llm_total = Math.round(performance.now() - tSttFinal);
       clearIdle();
+      const tail = toneStrip.flush();
+      rawReply += tail;
+      this.activeRawReply = rawReply;
+      for (const sentence of chunker.push(tail)) queueSentence(sentence);
       for (const sentence of chunker.flush()) queueSentence(sentence);
+      if (toneStrip.tagInvalid !== null) {
+        // The tag value itself is never logged: it is unconstrained LLM
+        // output and could echo caller words.
+        this.deps.log({ msg: "tone.tag_invalid", turnId, reason: toneStrip.tagInvalid });
+      }
       if (myTurn !== this.turnSeq || this.ended) return;
       await speakChain;
+      if (replyState.stream !== null) {
+        replyState.stream.finish();
+        await replyState.done;
+        ttsDoneAt = performance.now();
+      }
       if (myTurn !== this.turnSeq || this.ended) return;
       if (speakErrors.length > 0) throw speakErrors[0];
+      if (replyErrors.length > 0) throw replyErrors[0];
     } catch (error) {
       if (myTurn !== this.turnSeq || this.ended) return;
       throw error;
     } finally {
       clearIdle();
-      this.clearAckTimer();
       // M4: only clear when the next turn has not already replaced them.
       if (this.llmAbort === llmAbort) this.llmAbort = null;
       if (this.ttsAbort === ttsAbort) this.ttsAbort = null;
@@ -950,28 +1063,40 @@ export class VoiceSession {
     utterance.done = true;
     this.activeTimings = null;
     this.activeRawReply = "";
-    // The ack (if any) is fully sent; its utterance stays tracked so a tail
-    // barge-in still stops it, and its own playback.done prunes it silently.
-    const ackFirstAudioMs = this.activeAckFirstAudioMs;
-    const spokenText = utterance.sentences.map((s) => s.sentence).join(" ");
+    // activeTone and activeReplyWords stay for a playout-tail barge-in (they
+    // reset at the next turn start). The opener record stays too: it holds
+    // the heard opener text until the reply's own playback.done.
+    const openerFirstAudioMs = this.activeOpenerFirstAudioMs;
+    const tone = toneStrip.tone;
+    const replySpoken = utterance.sentences.map((s) => s.sentence).join(" ");
+    const spokenText =
+      openerText !== "" && replySpoken !== ""
+        ? `${openerText} ${replySpoken}`
+        : openerText !== ""
+          ? openerText
+          : replySpoken;
     // M31: TTS span lives in the store record and logs (the wire protocol's
     // TurnTimingsMs is frozen, so turn.metrics keeps the agreed fields).
     const ttsTotal = ttsStartAt === 0 ? null : Math.round(ttsDoneAt - ttsStartAt);
     // The store record (unlike the frozen wire TurnTimingsMs) also carries the
-    // caller-experienced ack timing when an ack played.
+    // caller-experienced opener timing when an opener played.
     const storeTimings: Record<string, number | null> = { ...timings, tts_total: ttsTotal };
-    if (ackFirstAudioMs !== null) storeTimings["ack_first_audio"] = ackFirstAudioMs;
+    if (openerFirstAudioMs !== null) storeTimings["opener_first_audio"] = openerFirstAudioMs;
     this.deps.send({ type: "agent.audio.end", utteranceId: turnId });
     this.deps.send({ type: "turn.metrics", turnId, timingsMs: timings });
     this.history.push({ role: "assistant", content: spokenText });
     this.trimHistory();
     this.seq += 1;
-    if (!this.recordingObjection) {
+    // An opener-only turn (empty LLM reply) still logs what was heard; a turn
+    // with neither model text nor opener stores nothing (the barge path
+    // already guards the same min-length contract).
+    const storedText = rawReply !== "" ? rawReply : openerText;
+    if (!this.recordingObjection && storedText !== "") {
       await this.deps.store.appendTurn(this.deps.tenantId, {
         interactionId: this.interactionId as string,
         seq: this.seq,
         speaker: "agent",
-        text: rawReply,
+        text: storedText,
         spokenText,
         language: agent.language,
         interrupted: false,
@@ -983,7 +1108,7 @@ export class VoiceSession {
         tokens: usage,
       });
     }
-    this.logTurn(timings, false, ttsTotal, ackFirstAudioMs);
+    this.logTurn(timings, false, ttsTotal, openerFirstAudioMs, tone);
     // M5: the last byte is SENT here, not heard: retain currentUtteranceId
     // until playback.done so a playout-tail barge-in still cancels the audio
     // and truncates history to what was heard (AGENTS.md 10.2). State stays
@@ -992,71 +1117,26 @@ export class VoiceSession {
     // here. It starts on playback.done (heard-anchored, AGENTS.md 10.3), with
     // a duration+margin backstop below if the ack never arrives.
     this.setState("listening");
+    // The client plays the opener before the reply, so the backstop covers
+    // both; it still fails toward a LATE prompt, never early.
+    const openerMs = this.activeOpener?.durationMs ?? 0;
     this.armPlaybackBackstop(
       turnId,
-      Math.round(totalDurationS(utterance.sentences) * 1000) + PLAYBACK_BACKSTOP_MARGIN_MS,
+      openerMs + Math.round(totalDurationS(utterance.sentences) * 1000) + PLAYBACK_BACKSTOP_MARGIN_MS,
     );
   }
 
-  // ---------- instant acknowledgement ----------
+  // ---------- opener ----------
 
-  private armAckTimer(myTurn: number, turnId: string, tSpeechEnded: number): void {
-    this.clearAckTimer();
-    if (!this.deps.config.ackEnabled) return;
-    this.ackTimer = setTimeout(() => {
-      this.ackTimer = null;
-      void this.maybePlayAck(myTurn, turnId, tSpeechEnded).catch((error: unknown) =>
-        this.deps.log({ msg: "ack.failed", error: errorMessage(error) }),
-      );
-    }, this.deps.config.ackDelayMs);
-    this.ackTimer.unref?.();
-  }
-
-  private clearAckTimer(): void {
-    if (this.ackTimer) clearTimeout(this.ackTimer);
-    this.ackTimer = null;
-  }
-
-  /**
-   * Play one rotating acknowledgement if the turn is still waiting for its
-   * first reply audio. The ack is a separate utterance (`ack-<turnId>`) sent
-   * atomically, so the client queues the reply behind it: never overlapping,
-   * never dropped. Not model content: never added to history or stored.
-   */
-  private async maybePlayAck(myTurn: number, turnId: string, tSpeechEnded: number): Promise<void> {
-    if (this.ended || myTurn !== this.turnSeq || this.state !== "thinking") return;
-    const agent = this.agent;
-    if (!agent) return;
-    const block = ACK_BLOCKS[this.ackCursor % ACK_BLOCKS.length] as BlockDefinition;
-    this.ackCursor += 1;
-    let rendered: RenderedBlock;
-    try {
-      rendered = await this.deps.blocks.render(block, {
-        orgName: agent.orgName,
-        voiceId: agent.voiceId,
-      });
-    } catch (error) {
-      this.deps.log({ msg: "ack.render_failed", blockId: block.id, error: errorMessage(error) });
-      return;
+  /** Stop a playing/queued opener, if any (barge-in path). */
+  private cancelActiveOpener(): void {
+    if (this.activeOpener === null) return;
+    const openerUtteranceId = this.activeOpener.utteranceId;
+    this.activeOpener = null;
+    this.activeOpenerHeard = false;
+    if (this.utterances.delete(openerUtteranceId)) {
+      this.deps.send({ type: "agent.cancelled", utteranceId: openerUtteranceId });
     }
-    // Re-check after the render: the reply may have started flowing, or the
-    // turn may have been barged, while we waited on the cache/TTS.
-    if (this.ended || myTurn !== this.turnSeq || this.state !== "thinking") return;
-    const ackUtteranceId = `ack-${turnId}`;
-    await this.playBlock(ackUtteranceId, rendered);
-    this.activeAckUtteranceId = ackUtteranceId;
-    const ackMs = Math.round(performance.now() - tSpeechEnded);
-    this.activeAckFirstAudioMs = ackMs;
-    this.deps.log({ msg: "ack.play", blockId: block.id, ackFirstAudioMs: ackMs, turnId });
-  }
-
-  /** Stop a playing/queued ack, if any (barge-in path). */
-  private cancelActiveAck(): void {
-    if (this.activeAckUtteranceId === null) return;
-    const ackUtteranceId = this.activeAckUtteranceId;
-    this.activeAckUtteranceId = null;
-    this.utterances.delete(ackUtteranceId);
-    this.deps.send({ type: "agent.cancelled", utteranceId: ackUtteranceId });
   }
 
   // ---------- barge-in ----------
@@ -1064,6 +1144,13 @@ export class VoiceSession {
   private handlePlaybackProgress(utteranceId: string, playedMs: number): void {
     const utterance = this.utterances.get(utteranceId);
     if (utterance) utterance.playedMs = Math.max(utterance.playedMs, playedMs);
+    if (
+      this.activeOpener !== null &&
+      utteranceId === this.activeOpener.utteranceId &&
+      playedMs >= this.activeOpener.durationMs - 1
+    ) {
+      this.activeOpenerHeard = true;
+    }
   }
 
   private handlePlaybackInterrupted(utteranceId: string, playedMs: number): void {
@@ -1081,8 +1168,11 @@ export class VoiceSession {
     // M5 tail: the turn already completed (full text in history and store).
     const wasDone = utterance?.done ?? false;
     const isBlock = utteranceId === "hold" || utteranceId === "silence-prompt";
+    // A heard opener is part of what the caller heard: it joins the truncated
+    // reply in history and storage. Capture it before the cancel clears it.
+    const openerHeard =
+      this.activeOpener !== null && this.activeOpenerHeard ? this.activeOpener.text : "";
     this.turnSeq += 1;
-    this.clearAckTimer();
     this.llmAbort?.abort();
     this.ttsAbort?.abort();
     this.llmAbort = null;
@@ -1090,19 +1180,28 @@ export class VoiceSession {
     this.currentUtteranceId = null;
     this.utterances.delete(utteranceId);
     const playedMs = Math.max(reportedPlayedMs, utterance?.playedMs ?? 0);
-    const spokenText = utterance ? truncateSpoken(utterance.sentences, playedMs) : "";
+    const replyHeard = utterance ? truncateReply(utterance.sentences, this.activeReplyWords, playedMs) : "";
+    const spokenText =
+      openerHeard !== "" && replyHeard !== ""
+        ? `${openerHeard} ${replyHeard}`
+        : openerHeard !== ""
+          ? openerHeard
+          : replyHeard;
     const rawReply = this.activeRawReply;
     const timings = this.activeTimings;
+    const tone = this.activeTone;
     this.activeTimings = null;
     this.activeRawReply = "";
+    this.activeTone = "neutral";
+    this.activeReplyWords = [];
     this.deps.send({ type: "agent.cancelled", utteranceId });
-    // Barge-in during an ack stops the ack like any other agent audio.
-    this.cancelActiveAck();
+    // Barge-in during the opener stops the opener like any other agent audio.
+    this.cancelActiveOpener();
     if (wasDone) {
       // Playout-tail barge: metrics and the full turn were already recorded.
       // Fix history to what was heard instead of appending a duplicate.
       this.replaceLastAssistantMessage(spokenText);
-      this.deps.log({ msg: "turn.barged_in", source, playedMs: Math.round(playedMs), tail: true });
+      this.deps.log({ msg: "turn.barged_in", source, playedMs: Math.round(playedMs), tail: true, tone });
       this.setState("listening");
       // The caller is speaking: no silence clock until their turn resolves.
       // Clears the tail backstop so it cannot arm under the new utterance.
@@ -1144,7 +1243,7 @@ export class VoiceSession {
       this.history.push({ role: "assistant", content: spokenText });
       this.trimHistory();
     }
-    this.deps.log({ msg: "turn.barged_in", source, playedMs: Math.round(playedMs) });
+    this.deps.log({ msg: "turn.barged_in", source, playedMs: Math.round(playedMs), tone });
     this.setState("listening");
     // The caller is speaking: no silence clock until their turn resolves.
     this.clearSilenceTimer();
@@ -1181,10 +1280,12 @@ export class VoiceSession {
       return;
     }
     this.turnSeq += 1;
-    this.clearAckTimer();
-    // The failure hold queues behind a sent ack; drop the tracking so a later
-    // barge-in cannot cancel the stale ack id (its done-ack prunes silently).
-    this.activeAckUtteranceId = null;
+    // The failure hold queues behind a sent opener; drop the turn's opener
+    // record so a later barge-in cannot attribute it to a new turn (the
+    // opener's own done-ack prunes its utterance silently).
+    this.activeOpener = null;
+    this.activeOpenerHeard = false;
+    this.activeOpenerFirstAudioMs = null;
     this.llmAbort?.abort();
     this.ttsAbort?.abort();
     this.llmAbort = null;
@@ -1310,7 +1411,6 @@ export class VoiceSession {
     this.turnSeq += 1;
     this.clearNoticeTimer();
     this.clearSilenceTimer();
-    this.clearAckTimer();
     if (this.maxSessionTimer) clearTimeout(this.maxSessionTimer);
     this.maxSessionTimer = null;
     this.llmAbort?.abort();
@@ -1355,9 +1455,11 @@ export class VoiceSession {
     return { role: "system", content: buildSystemPrompt(agent.personaPrompt) };
   }
 
-  private buildMessages(): ChatMessage[] {
+  private buildMessages(openerText = ""): ChatMessage[] {
     const tail = this.history.slice(-this.deps.config.maxHistoryTurns * 2);
-    return [this.buildSystemMessage(), ...tail];
+    const messages = [this.buildSystemMessage(), ...tail];
+    if (openerText !== "") messages.push(...openerMessages(openerText));
+    return messages;
   }
 
   /** Warmup request: the turn-1 system prefix plus a throwaway user message. */
@@ -1374,7 +1476,8 @@ export class VoiceSession {
     timings: TurnTimingsMs,
     interrupted: boolean,
     ttsTotal: number | null = null,
-    ackFirstAudioMs: number | null = null,
+    openerFirstAudioMs: number | null = null,
+    tone: ToneName = "neutral",
   ): void {
     // Ids and timings only: never transcript text, never keys.
     this.deps.log({
@@ -1382,13 +1485,14 @@ export class VoiceSession {
       sessionId: this.sessionId,
       interactionId: this.interactionId,
       interrupted,
+      tone,
       stt_ms: timings.stt,
       llm_first_token_ms: timings.llm_first_token,
       llm_total_ms: timings.llm_total,
       tts_first_audio_ms: timings.tts_first_audio,
       tts_total_ms: ttsTotal,
       end_to_first_audio_ms: timings.end_to_first_audio,
-      ack_first_audio_ms: ackFirstAudioMs,
+      opener_first_audio_ms: openerFirstAudioMs,
     });
   }
 }
@@ -1399,20 +1503,45 @@ function totalDurationS(sentences: SentenceAudio[]): number {
 }
 
 /**
- * Truncate an utterance to what was heard: whole sentences fully inside
- * `playedMs`, plus (when word timestamps exist) the words heard in the partial
- * sentence; otherwise the partial sentence is dropped.
+ * Attribute reply audio to sentences, proportionally to text length (TTS rate
+ * is near-constant, so chars approximate duration). Chunks arrive in push
+ * order on one context, so only the running total is known; word timestamps
+ * (absolute over the reply) refine truncation below. Byte counts stay even
+ * (16-bit samples) and sum exactly to the total.
  */
-export function truncateSpoken(sentences: SentenceAudio[], playedMs: number): string {
+export function attributeReplyAudio(sentences: SentenceAudio[], totalBytes: number, sampleRate: number): void {
+  const weights = sentences.map((s) => Math.max(1, s.sentence.length));
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+  if (totalWeight === 0) return;
+  let assigned = 0;
+  sentences.forEach((entry, index) => {
+    let bytes =
+      index === sentences.length - 1
+        ? totalBytes - assigned
+        : Math.floor((totalBytes * (weights[index] as number)) / totalWeight);
+    bytes -= bytes % 2;
+    assigned += bytes;
+    entry.audioBytes = bytes;
+    entry.durationS = bytes / 2 / sampleRate;
+  });
+}
+
+/**
+ * Truncate a reply to what was heard: whole sentences fully inside `playedMs`,
+ * plus (when word timestamps exist) the words heard in the partial sentence;
+ * otherwise the partial sentence is dropped. Word times are absolute over the
+ * reply (one TTS context), sentence offsets accumulate estimated durations.
+ */
+export function truncateReply(sentences: SentenceAudio[], words: WordTiming[], playedMs: number): string {
   const parts: string[] = [];
   let offsetMs = 0;
   for (const sentence of sentences) {
     const sentenceMs = sentence.durationS * 1000;
     if (playedMs >= offsetMs + sentenceMs - 1) {
       parts.push(sentence.sentence);
-    } else if (playedMs > offsetMs && sentence.words.length > 0) {
-      const heard = sentence.words
-        .filter((w) => w.endS * 1000 <= playedMs - offsetMs)
+    } else if (playedMs > offsetMs) {
+      const heard = words
+        .filter((w) => w.startS * 1000 >= offsetMs - 1 && w.endS * 1000 <= playedMs)
         .map((w) => w.text);
       if (heard.length > 0) parts.push(heard.join(" "));
       break;

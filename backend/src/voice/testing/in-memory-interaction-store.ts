@@ -124,6 +124,7 @@ export class InMemoryInteractionStore implements InteractionStore {
     _agentId?: string,
   ): Promise<{
     agentId: string;
+    agentName: string;
     orgName: string;
     personaPrompt: string;
     voiceId: string | null;
@@ -131,6 +132,7 @@ export class InMemoryInteractionStore implements InteractionStore {
   }> {
     return {
       agentId: "agt_test",
+      agentName: "Test Agent",
       orgName: "Test Org",
       personaPrompt: "Be brief and friendly.",
       voiceId: "fake-voice",
