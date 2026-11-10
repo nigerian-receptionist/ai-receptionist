@@ -81,10 +81,10 @@ WebSockets); LLM: Muse Spark via the OpenAI-compatible endpoint.
   outcome only, never text; failures never affect the session.
 - Instant acknowledgement (`ACK_ENABLED` default true, `ACK_DELAY_MS` default
   400): when the LLM's first token is slower than the delay, the session plays
-  one rotating pre-rendered ack ("Okay.", "Alright.", "Mm-hmm.",
-  "One moment.") as its own utterance, so the client queues the reply behind
-  it. Acks are not model content (never in history or turn text); barge-in
-  stops them like reply audio.
+  one rotating pre-rendered ack ("Okay.", "Right.", "Mm-hmm.", "Sure.") as its
+  own utterance, so the client queues the reply behind it. Acks are not model
+  content (never in history or turn text); barge-in stops them like reply
+  audio.
 - **No audio is persisted anywhere in this milestone.** Transcripts, timings
   and notice proof go to Postgres through `DrizzleInteractionStore` (the
   `InMemoryInteractionStore` is test-only now); both stores redact sensitive

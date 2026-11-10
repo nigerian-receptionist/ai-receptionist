@@ -55,9 +55,9 @@ export const SILENCE_PROMPT_BLOCK: BlockDefinition = {
  */
 export const ACK_BLOCKS: BlockDefinition[] = [
   { id: "ack_okay", version: 1, language: "en", template: "Okay." },
-  { id: "ack_alright", version: 1, language: "en", template: "Alright." },
+  { id: "ack_right", version: 1, language: "en", template: "Right." },
   { id: "ack_mmhmm", version: 1, language: "en", template: "Mm-hmm." },
-  { id: "ack_one_moment", version: 1, language: "en", template: "One moment." },
+  { id: "ack_sure", version: 1, language: "en", template: "Sure." },
 ];
 
 /** Used when the TTS vendor exposes no model revision (see TTS_MODEL_REVISION). */
