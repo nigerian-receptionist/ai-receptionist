@@ -53,7 +53,7 @@ only) except readiness. Errors are RFC 9457 `application/problem+json`.
 |---|---|---|
 | `GET /v1/health`, `GET /health` | no | Process liveness |
 | `GET /v1/ready` | no | 200 when Postgres answers `SELECT 1`, else 503 |
-| `GET /v1/agents` | yes | Tenant's agents, oldest first |
+| `GET /v1/agents?limit=&cursor=` | yes | Oldest first, keyset cursor, stable (`{data, nextCursor}`) |
 | `GET /v1/interactions?limit=&cursor=` | yes | Newest first, keyset cursor, stable |
 | `GET /v1/interactions/:id` | yes | Interaction with turns ordered by seq |
 
@@ -71,11 +71,14 @@ WebSockets); LLM: Muse Spark via the OpenAI-compatible endpoint.
 - Adapter interfaces in `adapters/types.ts`; vendor code behind them only.
 - Pre-rendered blocks (disclosure, notice, hold, silence prompt) are cached as
   raw PCM under `backend/.cache/blocks/` (gitignored), keyed by sha256 of
-  (text, language, voice, model, speed, tone).
+  (text, language, voice, model, model revision, speed, tone, sample rate).
+  Bump `TTS_MODEL_REVISION` whenever the TTS model changes.
 - **No audio is persisted anywhere in this milestone.** Transcripts, timings
-  and notice proof go to the `InteractionStore` (in-memory stand-in until the
-  Postgres data layer lands); the store is expected to redact sensitive values
-  before writing (see `src/interactions/interaction-store.ts`).
+  and notice proof go to Postgres through `DrizzleInteractionStore` (the
+  `InMemoryInteractionStore` is test-only now); both stores redact sensitive
+  values before writing (see `src/interactions/interaction-store.ts`).
+- Errors leave the API as RFC 9457 `application/problem+json` with stable
+  `urn:ai-receptionist:*` type ids (see `src/common/errors.ts`).
 - Latency: `turn.metrics` carries per-turn `stt`, `llm_first_token`,
   `llm_total`, `tts_first_audio` and `end_to_first_audio` (ms).
 

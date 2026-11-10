@@ -29,7 +29,7 @@ Source of truth for scope: `docs/prd/` (product requirements) and `docs/infrastr
 |---|---|---|
 | M0 | Repo, CI, tooling, decision records | CI green, pre-commit secret scan active, ADR 0001 merged |
 | **M1** | **`voice-lab/`: STT and TTS benchmarks, round-trip test, echo loop, LLM in the loop** | Benchmark tables committed, ADR 0002 (chosen models), recorded demo of a spoken exchange |
-| M2 | Backend skeleton (FastAPI, Postgres, Valkey, tenancy) | Health endpoint, migrations, RLS leak test, CI green |
+| M2 | Backend skeleton (NestJS, Postgres, Valkey, tenancy) | Health endpoint, migrations, RLS leak test, CI green |
 | M3 | Frontend skeleton (Next.js dashboard) | Contacts, agents and call-log list pages on real API data |
 | M4 | First real agent (LiveKit Agents or Pipecat) | Browser test call; transcript, audio and per-turn timings stored and visible in the log page |
 | M5 | SIP trunk, inbound and outbound phone calls | Calls succeed on MTN, Airtel, Glo, 9mobile; fraud limits tested |
@@ -47,27 +47,35 @@ If a directory does not exist yet, create it only when its milestone starts.
 /
   AGENTS.md                    this file
   README.md                    setup overview for humans
-  .env.example                 fake values only, every variable documented
+  .env.example                 compose vars only; backend vars live in backend/.env.example
   .gitignore
-  .pre-commit-config.yaml      gitleaks, ruff, formatting hooks
+  .pre-commit-config.yaml      gitleaks, eslint, formatting hooks
   docker-compose.yml           local Postgres (pgvector) and Valkey
-  backend/
-    pyproject.toml
-    app/
-      main.py                  FastAPI app factory
-      core/                    config, logging, security, errors, time, ids
-      api/v1/                  routers (one file per resource)
-      domain/                  business logic, no framework imports
-      adapters/                interfaces + vendor implementations
-        stt/ tts/ llm/ telephony/ whatsapp/ sms/ payments/ calendar/ crm/
-      db/                      models, session, migrations (alembic/)
-      workers/                 Temporal workers, post-call pipeline
-      policy/                  compliance gate rules (OPA bundles or Python rules)
-      tools/                   tool definitions, gateway, connectors
-      memory/                  memory extraction, validation, retrieval
-      observability/           tracing, metrics, event emitters
-    tests/
-      unit/ integration/ compliance/ leak/ golden/
+  backend/                     NestJS 11+, TypeScript strict, Drizzle, Zod, Vitest (ADR 0006)
+    package.json               pnpm scripts: dev, build, lint, typecheck, test, db:* (see README)
+    .env.example               backend env reference; copy to backend/.env
+    src/
+      main.ts                  bootstrap (binds 127.0.0.1, WS adapter, shutdown hooks)
+      app.module.ts            module wiring
+      config/                  env.ts (zod schema, validated once), config module
+      common/                  errors (typed ProblemError), cursor, uuidv7, problem filter
+      auth/                    guards, principal (OIDC later; dev guard is local-only)
+      db/                      schema.ts (Drizzle), db.service, migrate.ts, seed.ts, rls-check.ts
+      interactions/            InteractionStore interface + Drizzle store, controller
+      voice/                   gateway, session, prompts, speak policy, normalise, blocks/
+        adapters/              SpeechToText/TextToSpeech/LlmClient interfaces + vendor impls
+          stt/ tts/ llm/       (telephony/ whatsapp/ sms/ payments/ calendar/ crm/ later)
+      privacy/                 redaction before storage
+      contacts/ agents/ health/  resource modules (one folder per resource)
+      workers/                 (later) Temporal workers, post-call pipeline
+      policy/                  (later) compliance gate rules
+      tools/                   (later) tool definitions, gateway, connectors
+      memory/                  (later) memory extraction, validation, retrieval
+      observability/           (later) tracing, metrics, event emitters
+    drizzle/                   SQL migrations (drizzle-kit generate; roles_rls.sql applied last)
+    scripts/                   runnable entry points (voice-smoke.ts)
+    test/
+      unit/ integration/ leak/ (compliance/ and golden/ suites land with their milestones)
   frontend/
     package.json
     src/
@@ -427,40 +435,48 @@ Every run writes a `run_{run_id}.json` with hardware, versions, config and seeds
 
 ---
 
-## 7. Backend conventions (Python)
+## 7. Backend conventions (TypeScript, NestJS)
+
+The backend is NestJS with TypeScript strict, Drizzle ORM, Zod and Vitest
+(ADR 0006). `voice-lab/` stays Python (section 6).
 
 ### 7.1 Structure and style
-- `domain/` holds business logic with **no FastAPI, SQLAlchemy or vendor imports**. `api/` and `workers/` call `domain/`. `adapters/` implement interfaces defined in `domain/` or `adapters/*/base.py`.
-- Type hints everywhere. `mypy` strict for `app/`. Pydantic v2 models at every boundary (HTTP, queues, adapters, config).
-- `ruff` for lint and format. Line length 100. Imports sorted. No wildcard imports.
+- One NestJS module per resource (`interactions/`, `contacts/`, `agents/`, `voice/`, ...). Business logic lives in services and pure helpers with **no vendor imports**; controllers only validate, scope to the tenant and call services. `voice/adapters/` implement the `SpeechToText` / `TextToSpeech` / `LlmClient` interfaces; core code imports the interfaces, never a vendor SDK.
+- Strict TypeScript everywhere (`tsc --noEmit` clean). Zod schemas at every boundary (env, HTTP query/params, WebSocket client messages, store records).
+- ESLint (`typescript-eslint`) for lint. Line length 100. Imports sorted. No wildcard value imports. No `any` without a comment.
 - `async` for I/O. Never block the event loop in request, call or message paths (no sync network calls, no heavy CPU work; offload to a worker or thread pool).
-- Names: modules and functions `snake_case`, classes `PascalCase`, constants `UPPER_SNAKE`. Tables plural `snake_case`.
+- Names: files and functions `camelCase` (NestJS `*.controller.ts`, `*.service.ts`, `*.spec.ts` suffixes), classes and interfaces `PascalCase`, constants `UPPER_SNAKE`. Tables plural `snake_case`.
 - Small functions. No dead code, no commented-out code. Comments explain why, not what.
-- Raise typed domain errors (`ComplianceBlocked`, `ConsentMissing`, `ToolNotAllowed`, `TenantMismatch`). Map them to HTTP problems in one place. Never swallow exceptions around compliance, redaction or isolation code.
+- Throw typed domain errors (`ProblemError` subclasses such as `NotFoundError`, `InvalidStateError`, `ConflictError`; later `ComplianceBlocked`, `ConsentMissing`, `ToolNotAllowed`, `TenantMismatch`). The single problem filter maps them to RFC 9457 responses. Never swallow exceptions around compliance, redaction or isolation code.
 
 ### 7.2 Configuration
-- `pydantic-settings` reads environment variables. No config values in code. `.env.example` lists every variable with a fake value and a comment.
+- `src/config/env.ts` (Zod) validates environment variables once at startup. No config values in code. `backend/.env.example` lists every variable with a fake value and a comment; the root `.env.example` holds compose vars only.
 - Secrets come from the environment or the vault, never from files in the repo.
 
 | Variable | Purpose |
 |---|---|
 | `APP_ENV` | `local`, `dev`, `staging`, `prod` |
-| `LOG_LEVEL` | `INFO` default |
+| `PORT` | HTTP listen port, bound to 127.0.0.1 |
+| `LOG_LEVEL` | `debug`, `info` (default), `warn`, `error` |
 | `DEFAULT_TIMEZONE` | `Africa/Lagos` |
-| `DATABASE_URL`, `VALKEY_URL` | Data stores |
-| `HF_TOKEN` | Hugging Face token for gated models (never committed) |
-| `HF_HOME`, `MODEL_CACHE_DIR` | Persistent model cache |
-| `DATA_DIR` | Local datasets path (outside git) |
-| `STT_BACKEND`, `STT_MODEL`, `STT_DEVICE`, `STT_COMPUTE_TYPE` | Speech-to-text selection, for example `faster_whisper`, `large-v3-turbo`, `cuda`, `float16` |
-| `TTS_BACKEND`, `TTS_VOICE`, `TTS_DEVICE` | Text-to-speech selection, for example `yarngpt2`, `idera`, `cuda` |
-| `LLM_MODEL`, `LITELLM_BASE_URL` | Language model access through LiteLLM |
+| `ALLOWED_ORIGINS` | Comma-separated CORS allow-list |
+| `DATABASE_URL` | App role (non-owner, RLS enforced). Used by the app and DB tests |
+| `DATABASE_MIGRATION_URL` | Owner role. Used ONLY by `db:migrate` and `db:seed` |
+| `VALKEY_URL` | Valkey (Redis-protocol) connection URL |
+| `DEV_ACCESS_TOKEN`, `DEV_TENANT_ID` | Local-only dev auth (refused outside `local`/`dev`) |
+| `CARTESIA_API_KEY`, `CARTESIA_VERSION` | Hosted streaming STT/TTS (ADR 0007) |
+| `STT_MODEL`, `STT_LANGUAGE` | STT selection, for example `ink-2`, `en` |
+| `TTS_MODEL`, `TTS_VOICE`, `TTS_SAMPLE_RATE`, `TTS_MODEL_REVISION` | TTS selection and block-cache revision (bump the revision when the model changes) |
+| `MUSE_API_KEY`, `LLM_BASE_URL`, `LLM_MODEL`, `LLM_REASONING_EFFORT`, `LLM_MAX_COMPLETION_TOKENS` | LLM access through the OpenAI-compatible adapter |
+| `ENDPOINTING_SILENCE_MS` | End-of-turn silence the browser VAD waits for |
+| `VOICE_MAX_TURNS`, `VOICE_MAX_TURN_AUDIO_S`, `VOICE_MAX_SESSION_S`, `VOICE_MAX_BYTES_PER_SEC`, `VOICE_MAX_TRANSCRIPT_CHARS` | Per-session cost caps (F4) |
 
 ### 7.3 Identity, time, money, phones, languages
-- IDs: UUIDs (v7 preferred for index locality). Public references use prefixed IDs (`agt_`, `int_`, `con_`).
+- IDs: UUIDs (v7 for index locality; see `common/uuidv7.ts`). Public references use prefixed IDs (`agt_`, `int_`, `trn_`, `con_`); endpoints accept the prefixed or raw form.
 - Time: store UTC `timestamptz`. Evaluate calling windows and render times in `Africa/Lagos`. Use a holiday calendar table; never hard-code holidays.
 - Money: integer minor units (kobo) plus ISO currency code (`NGN`). Never floats.
-- Phone numbers: normalise to E.164 with the `phonenumbers` library. Accept `0803...`, `803...`, `+234803...`. Store the original input separately for audit.
-- Languages: `en-NG`, `pcm` (Nigerian Pidgin), `yo`, `ig`, `ha`. Language codes are a Python `Literal` or enum defined once.
+- Phone numbers: normalise to E.164 with `libphonenumber-js` (default region NG). Accept `0803...`, `803...`, `+234803...`. Store the original input separately for audit.
+- Languages: `en-NG`, `pcm` (Nigerian Pidgin), `yo`, `ig`, `ha`. Language codes are a TypeScript union type defined once.
 
 ### 7.4 Reliability patterns
 - **Idempotency:** every retryable operation (webhook, dial attempt, tool call, message send, payment link) carries an idempotency key. Store keys with results for a defined period.
@@ -495,7 +511,7 @@ CREATE POLICY tenant_isolation ON contacts
 ```
 
 - Partition high-volume tables (`turns`, `events`, `usage_events`) by month. Plan retention and purge jobs from the start.
-- Migrations only through Alembic. Never edit an applied migration. Destructive changes need a two-step migration (add, backfill, switch, drop later).
+- Migrations only through Drizzle (`drizzle-kit generate` from `src/db/schema.ts`, applied by `db:migrate`, roles/RLS script last). Never edit an applied migration. Destructive changes need a two-step migration (add, backfill, switch, drop later).
 - Soft delete where history matters, with a **hard-delete job** for data-subject deletion requests that also removes search index entries, caches, derived memory and embeddings.
 
 ### 8.2 Core tables (initial)
@@ -739,24 +755,24 @@ List with filters on every field and transcript search; detail with transcript a
 ## 15. Testing requirements
 
 ### 15.1 Layers
-- **Unit:** domain logic, normalisers, redactors, policy rules, SMS segment counter, metrics.
-- **Integration:** real Postgres and Valkey (Testcontainers or Compose). **Do not mock the database for row-level security tests.**
-- **Compliance suite** (`tests/compliance/`, must always pass):
+- **Unit:** services, normalisers, redactors, policy rules, SMS segment counter, metrics. Vitest (`*.spec.ts` next to the source or under `test/unit/`); `pnpm test`.
+- **Integration:** real Postgres and Valkey (Compose for local dev). **Do not mock the database for row-level security tests.** Vitest with `vitest.integration.config.ts`; `pnpm test:integration`. HTTP-level tests boot controllers with `@nestjs/testing` + `supertest`.
+- **Compliance suite** (`test/compliance/`, must always pass):
   - recording notice delivered before audio is persisted; no notice means audio purged and a flag raised
   - AI disclosure present at call start
   - out-of-window attempt blocked; DND and opt-out honoured; frequency cap enforced
   - sensitive values redacted from transcripts, notes, memory, logs and traces
   - agent refuses to collect card numbers, PINs, OTPs, BVN or NIN
   - identity check required before sensitive tools or disclosures
-- **Leak suite** (`tests/leak/`): for every tenant table, endpoint, cache, storage path and vector or search query, tenant A cannot read or influence tenant B.
+- **Leak suite** (`test/leak/`): for every tenant table, endpoint, cache, storage path and vector or search query, tenant A cannot read or influence tenant B.
 - **Golden and testbed:** conversation cases per vertical and language (English, Pidgin, Yoruba, Igbo, Hausa) with deterministic assertions (tool called with arguments, variable captured, mandatory wording present, banned phrases absent, latency under limit) and judged rubrics. Repeat LLM-dependent cases several times and assert on pass rate.
 - **Voice-lab:** benchmark scripts are reproducible and produce the CSV schema in 6.5.
 
 ### 15.2 Rules
-- Mark model-heavy tests `@pytest.mark.gpu` or `@pytest.mark.slow`; CI skips them. No model downloads in CI.
+- Mark model-heavy backend tests slow/skipped in CI (`describe.skipIf` or a separate config); mark voice-lab model tests `@pytest.mark.gpu` or `@pytest.mark.slow`. No model downloads in CI.
 - Use **synthetic data only** (fake names, numbers, transcripts, audio from TTS). No real customer data anywhere in the repo.
 - Every bug fix includes a test that fails before the fix.
-- Target at least 80% coverage on `domain/`, `policy/` and redaction code. Coverage is a floor, not a goal.
+- Target at least 80% coverage on services, `policy/` and redaction code. Coverage is a floor, not a goal.
 
 ---
 
@@ -789,16 +805,16 @@ List with filters on every field and transcript search; detail with transcript a
 6. Pre-render the disclosure and recording-notice blocks for the voice and verify playback through an 8 kHz phone simulation.
 
 ### 17.3 Add a database table
-1. Alembic migration with `tenant_id`, timestamps, indexes and the RLS policy (8.1).
-2. SQLAlchemy model and Pydantic schemas.
+1. Add the table to `src/db/schema.ts` with `tenant_id`, timestamps, indexes and the RLS policy (8.1); generate the migration with `drizzle-kit generate`, apply with `pnpm db:setup`.
+2. Drizzle table + Zod schemas for reads/writes.
 3. Leak test proving tenant isolation; compliance test if it stores sensitive data.
 4. Retention and deletion handling; update the hard-delete job.
 5. Update the core tables list in this file if it is a core table.
 
 ### 17.4 Add an API endpoint
-1. Router in `api/v1/`, permission declared, schemas defined, errors mapped.
+1. NestJS controller under the resource module (`GET /v1/...`), guard/permission declared, Zod schemas for query/params, typed `ProblemError` on failures.
 2. Idempotency key if it creates or sends.
-3. Tenant scoping tested; OpenAPI regenerated; frontend client regenerated.
+3. Keyset (`limit`, `cursor`) pagination on list endpoints; tenant scoping tested at HTTP level; OpenAPI regenerated; frontend client regenerated.
 
 ### 17.5 Add a tool
 1. Tool definition (12.1), connector adapter, sandbox account.

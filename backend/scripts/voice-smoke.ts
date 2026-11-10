@@ -10,6 +10,8 @@
  * Never prints secrets: only message types, timings and transcript text that
  * this script itself generated.
  */
+import { performance } from "node:perf_hooks";
+
 import WebSocket from "ws";
 
 import { loadEnv } from "../src/config/env";
@@ -52,6 +54,12 @@ async function main(): Promise<void> {
   let audioBytes = 0;
   let metrics: TurnTimingsMs | null = null;
   let agentText = "";
+  let outputSampleRate = 24000;
+  // Notice-block playout tracking: ack only after the block could have played (F2).
+  const noticeAudio = new Map<string, { firstAt: number; bytes: number }>();
+  // Client-measured turn latency (AGENTS.md 10.4 budget, speech end -> agent speech).
+  let tSpeechEndedSend = 0;
+  let tFirstAgentAudio = 0;
   const failures: string[] = [];
   const done = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("smoke timed out waiting for turn.metrics")), 120_000);
@@ -59,6 +67,7 @@ async function main(): Promise<void> {
       const message = JSON.parse(raw.toString()) as ServerMessage;
       switch (message.type) {
         case "session.ready":
+          outputSampleRate = message.outputSampleRate;
           console.log(
             `[smoke] ready: stt=${message.sttModelId} tts=${message.ttsModelId} llm=${message.llmModel} out=${message.outputSampleRate}Hz`,
           );
@@ -70,15 +79,22 @@ async function main(): Promise<void> {
         case "agent.text":
           if (message.kind === "speech") agentText += message.delta;
           break;
-        case "agent.audio":
-          if (!message.utteranceId.startsWith("notice-")) {
+        case "agent.audio": {
+          const bytes = Buffer.from(message.pcmBase64, "base64").length;
+          if (message.utteranceId.startsWith("notice-")) {
+            const tracked = noticeAudio.get(message.utteranceId);
+            if (tracked) tracked.bytes += bytes;
+            else noticeAudio.set(message.utteranceId, { firstAt: performance.now(), bytes });
+          } else {
             audioChunks += 1;
-            audioBytes += Buffer.from(message.pcmBase64, "base64").length;
+            audioBytes += bytes;
+            if (tFirstAgentAudio === 0) tFirstAgentAudio = performance.now();
           }
           break;
+        }
         case "agent.audio.end":
           if (message.utteranceId.startsWith("notice-")) {
-            ws.send(JSON.stringify({ type: "playback.done", utteranceId: message.utteranceId }));
+            void ackAfterPlayout(message.utteranceId);
           }
           break;
         case "transcript.final":
@@ -111,6 +127,18 @@ async function main(): Promise<void> {
     });
   });
 
+  async function ackAfterPlayout(utteranceId: string): Promise<void> {
+    const tracked = noticeAudio.get(utteranceId);
+    const durationMs = tracked ? (tracked.bytes / 2 / outputSampleRate) * 1000 : 0;
+    const firstAt = tracked?.firstAt ?? performance.now();
+    const waitMs = firstAt + durationMs - performance.now();
+    if (waitMs > 0) await sleep(waitMs);
+    console.log(
+      `[smoke] ack ${utteranceId} after ${Math.round(durationMs)} ms playout (${tracked?.bytes ?? 0} bytes)`,
+    );
+    ws.send(JSON.stringify({ type: "playback.done", utteranceId }));
+  }
+
   let turnStarted = false;
   async function runTurn(): Promise<void> {
     if (turnStarted) return;
@@ -121,6 +149,7 @@ async function main(): Promise<void> {
       ws.send(callerPcm16k.subarray(offset, offset + FRAME_BYTES_20MS));
       await sleep(20);
     }
+    tSpeechEndedSend = performance.now();
     ws.send(JSON.stringify({ type: "input.speech_ended", atMs: Date.now() }));
   }
 
@@ -130,9 +159,19 @@ async function main(): Promise<void> {
   if (seenFinal.trim() === "") failures.push("empty transcript.final");
   if (audioChunks === 0) failures.push("no agent.audio received");
   if (!metrics) failures.push("no turn.metrics received");
+  const clientEndToFirstAudioMs =
+    tSpeechEndedSend === 0 || tFirstAgentAudio === 0
+      ? null
+      : Math.round(tFirstAgentAudio - tSpeechEndedSend);
   console.log(`[smoke] agent text: ${JSON.stringify(agentText.trim())}`);
   console.log(`[smoke] agent audio: ${audioChunks} chunks, ${(audioBytes / 2 / 24000).toFixed(2)}s`);
-  console.log(`[smoke] timings ms: ${JSON.stringify(metrics)}`);
+  console.log(`[smoke] timings ms (server): ${JSON.stringify(metrics)}`);
+  console.log(
+    `[smoke] client end_to_first_audio ms: ${clientEndToFirstAudioMs} (AGENTS.md 10.4 target 1000-1500)`,
+  );
+  // Generous sanity bound (vendor latency varies); the 10.4 target is reported, not gated.
+  if (clientEndToFirstAudioMs === null) failures.push("no client first-audio stamp");
+  else if (clientEndToFirstAudioMs > 30000) failures.push("client end_to_first_audio over 30 s");
   ws.send(JSON.stringify({ type: "session.end" }));
   ws.close();
   if (failures.length > 0) {

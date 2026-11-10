@@ -19,6 +19,7 @@ const TABLES = ["tenants", "agents", "contacts", "interactions", "turns"] as con
 
 describe("RLS tenant isolation (real Postgres, app role, no mocks)", () => {
   let pool: Pool;
+  let owner: Pool;
   let service: DbService;
   let a: Fixture;
   let b: Fixture;
@@ -48,15 +49,16 @@ describe("RLS tenant isolation (real Postgres, app role, no mocks)", () => {
   }
 
   beforeAll(async () => {
-    ({ pool, service } = createTestDb());
+    ({ pool, owner, service } = createTestDb());
     a = await seed("Leak A Ltd", "+2347000000001");
     b = await seed("Leak B Ltd", "+2347000000002");
   });
 
   afterAll(async () => {
-    await deleteTenantData(service, a.tenantId).catch(() => undefined);
-    await deleteTenantData(service, b.tenantId).catch(() => undefined);
+    await deleteTenantData(owner, a.tenantId).catch(() => undefined);
+    await deleteTenantData(owner, b.tenantId).catch(() => undefined);
     await pool.end().catch(() => undefined);
+    await owner.end().catch(() => undefined);
   });
 
   it("tenant A reads only its own rows in every table", async () => {
@@ -178,6 +180,17 @@ describe("RLS tenant isolation (real Postgres, app role, no mocks)", () => {
     expect(check.tenant?.name).toBe("Leak B Ltd");
     expect(check.agent?.name).toBe("Leak B Ltd agent");
     expect(check.turn?.text).toBe("hi");
+  });
+
+  it("the app role has no DELETE grant on any table (F9.3, M26)", async () => {
+    for (const table of TABLES) {
+      const err = await pool.query(`DELETE FROM ${table}`).then(
+        () => null,
+        (e: unknown) => e as { message?: string },
+      );
+      expect(err, `${table} delete must fail`).not.toBeNull();
+      expect(err?.message ?? "", table).toMatch(/permission denied|insufficient_privilege/i);
+    }
   });
 
   it("with no tenant set the app role sees zero rows in every table", async () => {

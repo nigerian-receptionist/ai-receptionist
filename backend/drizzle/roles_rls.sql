@@ -30,14 +30,16 @@ END
 $$;
 
 GRANT USAGE ON SCHEMA public TO ai_receptionist_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ai_receptionist_app;
+-- F9.3: no DELETE for the app role. Deletes (including data-subject hard
+-- deletes) run as the owner role, never from request/voice paths.
+GRANT SELECT, INSERT, UPDATE ON ALL TABLES IN SCHEMA public TO ai_receptionist_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ai_receptionist_app;
 
 DO $$
 BEGIN
   EXECUTE format(
     'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public ' ||
-    'GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ai_receptionist_app',
+    'GRANT SELECT, INSERT, UPDATE ON TABLES TO ai_receptionist_app',
     CURRENT_USER
   );
   EXECUTE format(
@@ -47,6 +49,12 @@ BEGIN
   );
 END
 $$;
+
+-- Revoke DELETE granted by earlier versions of this script (the GRANTs above
+-- do not remove already-granted privileges), and keep the app role off the
+-- drizzle bookkeeping table entirely.
+REVOKE DELETE ON ALL TABLES IN SCHEMA public FROM ai_receptionist_app;
+REVOKE ALL ON TABLE drizzle.__drizzle_migrations FROM ai_receptionist_app;
 
 -- 3. FORCE ROW LEVEL SECURITY on every tenant table. With no tenant set,
 -- current_setting('app.tenant_id', true) returns NULL (or '' on a recycled pool

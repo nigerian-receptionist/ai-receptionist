@@ -1,5 +1,6 @@
 import {
   boolean,
+  check,
   doublePrecision,
   index,
   integer,
@@ -10,6 +11,7 @@ import {
   unique,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /**
  * Multi-tenant tables (AGENTS.md 8.1/8.2). Every table carries `tenant_id` and
@@ -26,14 +28,18 @@ export const tenants = pgTable(
   {
     id: uuid("id").primaryKey(),
     // Mirrors `id` so every tenant table has a uniform `tenant_id` column for
-    // RLS policies. Always insert with tenantId === id.
+    // RLS policies. The CHECK below enforces tenantId === id at the database
+    // level (a tenant row in the wrong partition breaks RLS assumptions).
     tenantId: uuid("tenant_id").notNull(),
     name: text("name").notNull(),
     settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index("tenants_tenant_created_idx").on(t.tenantId, t.createdAt)],
+  (t) => [
+    index("tenants_tenant_created_idx").on(t.tenantId, t.createdAt),
+    check("tenants_tenant_id_is_id", sql`${t.tenantId} = ${t.id}`),
+  ],
 );
 
 export const agents = pgTable(
@@ -71,6 +77,16 @@ export const contacts = pgTable(
   ],
 );
 
+/**
+ * Tenant-linkage invariant: foreign keys below reference the parent `id`
+ * only, NOT `(id, tenant_id)`. Cross-tenant linkage (e.g. an interaction
+ * pointing at another tenant's agent) is prevented at the application layer:
+ * every store read/write runs inside `withTenant`, so a foreign row reads as
+ * missing (NotFoundError) outside its tenant — covered by the store and leak
+ * suites. Composite `(id, tenant_id)` foreign keys would enforce this in the
+ * database and are the preferred follow-up if the write paths ever bypass
+ * the store.
+ */
 export const interactions = pgTable(
   "interactions",
   {
@@ -89,6 +105,9 @@ export const interactions = pgTable(
     noticeBlockVersion: integer("notice_block_version"),
     noticeBlockHash: text("notice_block_hash"),
     noticeDeliveredAt: timestamp("notice_delivered_at", { withTimezone: true }),
+    // Compliance flags (e.g. "notice_failed" when the disclosure/notice was
+    // never confirmed). Set only via endInteraction; empty means no flags.
+    complianceFlags: jsonb("compliance_flags").$type<string[]>().notNull().default([]),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -117,6 +136,7 @@ export const turns = pgTable(
     sttModelId: text("stt_model_id"),
     sttConfidence: doublePrecision("stt_confidence"),
     llmModel: text("llm_model"),
+    promptVersion: integer("prompt_version"),
     ttsModelId: text("tts_model_id"),
     voiceId: text("voice_id"),
     blockId: text("block_id"),

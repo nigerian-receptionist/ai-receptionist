@@ -36,3 +36,14 @@ exchange with low latency, without running GPU models locally.
 - Cartesia does not list Yoruba, Igbo, Hausa or Pidgin as languages; English
   (Nigerian accent) only for now.
 - Usage is metered; per-turn usage is logged so cost is visible.
+
+## Known gaps (must close before any pilot)
+
+- **Names and addresses are not yet redacted.** The `redact()` rules cover
+  card numbers, BVN/NIN, NUBAN, OTP/PIN, phone numbers, emails and URLs, but
+  AGENTS.md 9.2 rule 10 also requires name/address detection (Presidio
+  recognisers plus custom Nigerian patterns). A caller sentence like "my name
+  is Adaeze Okafor, I live at 14 Allen Avenue Ikeja" is currently persisted
+  verbatim. Add name/address recognisers and table-driven tests before any
+  pilot; this gap was deliberately left open (no Presidio) in the
+  review-findings pass of 2026-11-10.

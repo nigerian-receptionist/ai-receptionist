@@ -1,0 +1,1 @@
+ALTER TABLE "turns" ADD COLUMN "prompt_version" integer;

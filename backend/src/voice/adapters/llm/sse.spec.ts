@@ -28,4 +28,19 @@ describe("SseParser", () => {
     expect(parser.push('data: {"a":1}\r\n\r\ndata: [DONE]\r\n')).toEqual(['{"a":1}']);
     expect(parser.isDone).toBe(true);
   });
+
+  it("flush() returns a trailing line without a newline", () => {
+    const parser = new SseParser();
+    expect(parser.push('data: {"a":1}\n')).toEqual(['{"a":1}']);
+    expect(parser.push('data: {"b":2}')).toEqual([]);
+    expect(parser.flush()).toEqual(['{"b":2}']);
+    expect(parser.flush()).toEqual([]);
+  });
+
+  it("flush() honours a trailing [DONE] without a newline", () => {
+    const parser = new SseParser();
+    expect(parser.push("data: [DONE]")).toEqual([]);
+    expect(parser.flush()).toEqual([]);
+    expect(parser.isDone).toBe(true);
+  });
 });

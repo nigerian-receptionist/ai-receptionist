@@ -64,10 +64,12 @@ export class CartesiaTts implements TextToSpeech {
       language: string;
       tone?: string;
       speed?: number;
+      sampleRate?: number;
       signal?: AbortSignal;
     },
   ): Promise<TtsResult> {
     const startedAt = performance.now();
+    const sampleRate = opts.sampleRate ?? 24000;
     const timeout = AbortSignal.timeout(this.restTimeoutMs);
     const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
     const request = (): Promise<Response> =>
@@ -82,7 +84,7 @@ export class CartesiaTts implements TextToSpeech {
           model_id: this.model,
           transcript: text,
           voice: { id: opts.voiceId },
-          output_format: { container: "raw", encoding: "pcm_s16le", sample_rate: 24000 },
+          output_format: { container: "raw", encoding: "pcm_s16le", sample_rate: sampleRate },
           language: opts.language,
           generation_config: generationConfig(opts.tone, opts.speed),
         }),
@@ -104,11 +106,12 @@ export class CartesiaTts implements TextToSpeech {
       throw new Error(`tts rest http ${response.status}: ${detail.slice(0, 300)}`);
     }
     const pcm = Buffer.from(await response.arrayBuffer());
+    if (pcm.length % 2 !== 0) throw new Error("tts rest returned odd-length pcm");
     const totalS = (performance.now() - startedAt) / 1000;
     return {
       pcmS16le: pcm,
-      sampleRate: 24000,
-      durationS: pcm.length / 2 / 24000,
+      sampleRate,
+      durationS: pcm.length / 2 / sampleRate,
       timeToFirstAudioS: totalS,
       totalLatencyS: totalS,
       voiceId: opts.voiceId,
@@ -263,6 +266,9 @@ export class CartesiaTtsSession implements TtsStreamSession {
       );
       let isFirst = true;
       for (;;) {
+        // Check errors BEFORE draining: post-abort buffered chunks are stale
+        // and must never leak past a cancel.
+        if (state.error) throw state.error;
         while (state.queue.length > 0) {
           const event = state.queue.shift();
           if (!event) break;
@@ -272,7 +278,6 @@ export class CartesiaTtsSession implements TtsStreamSession {
           }
           yield event;
         }
-        if (state.error) throw state.error;
         if (state.finished) return;
         await new Promise<void>((resolve) => {
           state.waiter = resolve;

@@ -1,12 +1,4 @@
-import {
-  BadRequestException,
-  Controller,
-  Get,
-  NotFoundException,
-  Param,
-  Query,
-  UseGuards,
-} from "@nestjs/common";
+import { Controller, Get, Inject, Param, Query, UseGuards } from "@nestjs/common";
 import { desc, eq, lt } from "drizzle-orm";
 import { z } from "zod";
 
@@ -14,6 +6,7 @@ import { DevAuthGuard } from "../auth/dev-auth.guard";
 import type { Principal as DevPrincipal } from "../auth/dev-auth";
 import { Principal } from "../auth/principal";
 import { decodeCursor, encodeCursor } from "../common/cursor";
+import { InvalidCursorError, NotFoundError } from "../common/errors";
 import { DbService } from "../db/db.service";
 import { interactions, turns, type InteractionRow, type TurnRow } from "../db/schema";
 import { toPublicId, toRawId } from "./ids";
@@ -34,6 +27,7 @@ function toInteractionDto(row: InteractionRow) {
     direction: row.direction,
     status: row.status,
     endReason: row.endReason,
+    complianceFlags: row.complianceFlags,
     recordingState: row.recordingState,
     noticeBlockId: row.noticeBlockId,
     noticeBlockVersion: row.noticeBlockVersion,
@@ -57,6 +51,7 @@ function toTurnDto(row: TurnRow) {
     sttModelId: row.sttModelId,
     sttConfidence: row.sttConfidence,
     llmModel: row.llmModel,
+    promptVersion: row.promptVersion,
     ttsModelId: row.ttsModelId,
     voiceId: row.voiceId,
     blockId: row.blockId,
@@ -70,14 +65,15 @@ function toTurnDto(row: TurnRow) {
 @Controller("v1/interactions")
 @UseGuards(DevAuthGuard)
 export class InteractionsController {
-  constructor(private readonly db: DbService) {}
+  // M6: explicit token — tsx/esbuild emit no decorator metadata.
+  constructor(@Inject(DbService) private readonly db: DbService) {}
 
   /** Newest first by UUIDv7 id (creation order), keyset-paginated, stable. */
   @Get()
   async list(@Principal() principal: DevPrincipal, @Query() query: unknown) {
     const { limit, cursor } = listQuerySchema.parse(query);
     const decoded = cursor === undefined ? null : decodeCursor(cursor);
-    if (cursor !== undefined && decoded === null) throw new BadRequestException("Invalid cursor");
+    if (cursor !== undefined && decoded === null) throw new InvalidCursorError();
 
     const rows = await this.db.withTenant(principal.tenantId, async (tx) =>
       tx
@@ -99,12 +95,8 @@ export class InteractionsController {
   @Get(":id")
   async getOne(@Principal() principal: DevPrincipal, @Param() params: unknown) {
     const { id } = idParamSchema.parse(params);
-    let rawId: string;
-    try {
-      rawId = toRawId(id, "int");
-    } catch {
-      throw new BadRequestException("Invalid interaction id");
-    }
+    // toRawId throws InvalidIdError (400 invalid-id) on malformed ids.
+    const rawId = toRawId(id, "int");
 
     const result = await this.db.withTenant(principal.tenantId, async (tx) => {
       const found = await tx
@@ -122,7 +114,8 @@ export class InteractionsController {
       return { interaction, turnRows };
     });
 
-    if (result === null) throw new NotFoundException("Interaction not found");
+    // Cross-tenant and missing ids are indistinguishable: 404 not-found.
+    if (result === null) throw new NotFoundError("interaction");
     return { ...toInteractionDto(result.interaction), turns: result.turnRows.map(toTurnDto) };
   }
 }
