@@ -6,26 +6,35 @@
     "dev": "next dev --hostname 127.0.0.1",
     "build": "next build",
     "start": "next start --hostname 127.0.0.1",
-    "lint": "next lint",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "vad:assets": "node scripts/copy-vad-assets.mjs",
     "postinstall": "node scripts/copy-vad-assets.mjs"
   },
   "dependencies": {
     "@ricky0123/vad-web": "0.0.31",
-    "next": "15.5.9",
+    "next": "15.5.28",
     "onnxruntime-web": "1.31.1",
     "react": "19.1.1",
     "react-dom": "19.1.1"
   },
   "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
     "@types/node": "22.19.1",
     "@types/react": "19.1.17",
     "@types/react-dom": "19.1.11",
     "autoprefixer": "10.4.22",
-    "postcss": "8.5.6",
+    "eslint": "9",
+    "eslint-config-next": "15.5.28",
+    "postcss": "8.5.32",
     "tailwindcss": "3.4.18",
     "typescript": "5.9.3",
     "vitest": "5.1.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "postcss": "8.5.32"
+    }
   }
 }

@@ -1,8 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import { useMemo } from "react";
 
 import type { AgentState } from "@/features/talk/protocol";
+import { clampEndpointingSilenceMs } from "@/features/talk/speech-gate";
 import { useTalkSession } from "@/features/talk/use-talk-session";
 
 const STATE_LABELS: Record<AgentState, string> = {
@@ -19,7 +21,9 @@ export default function TalkPage() {
     () => ({
       wsUrl: process.env.NEXT_PUBLIC_VOICE_WS_URL ?? "ws://127.0.0.1:8000/v1/voice",
       token: process.env.NEXT_PUBLIC_DEV_ACCESS_TOKEN ?? "",
-      endpointingSilenceMs: Number(process.env.NEXT_PUBLIC_ENDPOINTING_SILENCE_MS ?? "600"),
+      endpointingSilenceMs: clampEndpointingSilenceMs(
+        process.env.NEXT_PUBLIC_ENDPOINTING_SILENCE_MS,
+      ),
     }),
     [],
   );
@@ -29,14 +33,14 @@ export default function TalkPage() {
   return (
     <main className="min-h-screen md:grid md:grid-cols-[230px_1fr]">
       <aside className="border-b border-[#e2e6df] bg-white px-6 py-7 md:min-h-screen md:border-b-0 md:border-r">
-        <a className="flex items-center gap-3 text-sm font-bold tracking-wide" href="/">
+        <Link className="flex items-center gap-3 text-sm font-bold tracking-wide" href="/">
           <span className="grid h-9 w-9 place-items-center rounded-xl bg-[#183f35] text-white">A</span>
           RECEPTIONIST
-        </a>
+        </Link>
         <p className="mb-3 mt-10 text-[11px] font-semibold uppercase tracking-[.16em] text-[#89928a]">Workspace</p>
         <nav className="grid gap-1 text-sm">
-          <a className="rounded-lg px-3 py-2.5 text-[#3c4740] hover:bg-[#f1f3f0]" href="/">Overview</a>
-          <a className="rounded-lg bg-[#edf3ef] px-3 py-2.5 font-semibold text-[#183f35]" href="/talk" aria-current="page">Talk</a>
+          <Link className="rounded-lg px-3 py-2.5 text-[#3c4740] hover:bg-[#f1f3f0]" href="/">Overview</Link>
+          <Link className="rounded-lg bg-[#edf3ef] px-3 py-2.5 font-semibold text-[#183f35]" href="/talk" aria-current="page">Talk</Link>
           <span className="px-3 py-2.5 text-[#7d877e]">Contacts <small className="float-right">Soon</small></span>
           <span className="px-3 py-2.5 text-[#7d877e]">Agents <small className="float-right">Soon</small></span>
           <span className="px-3 py-2.5 text-[#7d877e]">Call logs <small className="float-right">Soon</small></span>
