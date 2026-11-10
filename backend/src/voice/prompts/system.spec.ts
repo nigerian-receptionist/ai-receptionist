@@ -19,11 +19,14 @@ const REQUIRED_RULES = [
   "do not counsel, diagnose, or give legal, medical or financial advice",
   "Never ask for or repeat card numbers, PINs, OTPs",
   "Offer to send links or addresses by WhatsApp or SMS",
+  "Begin EVERY reply with a hidden tone tag",
+  "[tone: <name>]",
+  "Use ONLY these seven names",
 ];
 
 describe("voice system prompt", () => {
-  it("is at version 2 with the persona appended", () => {
-    expect(VOICE_SYSTEM_PROMPT_VERSION).toBe(2);
+  it("is at version 3 with the persona appended", () => {
+    expect(VOICE_SYSTEM_PROMPT_VERSION).toBe(3);
     expect(buildSystemPrompt("Be cheerful.")).toContain("Agent persona:\nBe cheerful.");
     expect(buildSystemPrompt("  ")).not.toContain("Agent persona:");
   });
