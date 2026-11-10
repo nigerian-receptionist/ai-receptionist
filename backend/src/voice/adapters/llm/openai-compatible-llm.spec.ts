@@ -81,6 +81,26 @@ describe("OpenAiCompatibleLlm", () => {
     expect(skipped).toEqual([1]);
   });
 
+  it("prewarm() opens the connection with GET /models", async () => {
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: { headers?: Record<string, string> }) => {
+        seen.push({ url, auth: init.headers?.["Authorization"] ?? null });
+        return new Response(JSON.stringify({ data: [] }), { status: 200 });
+      }),
+    );
+    const llm = new OpenAiCompatibleLlm({
+      baseUrl: "https://llm.test/v1",
+      apiKey: "test-key",
+      model: "test-model",
+      reasoningEffort: "minimal",
+      maxCompletionTokens: 400,
+    });
+    await llm.prewarm();
+    expect(seen).toEqual([{ url: "https://llm.test/v1/models", auth: "Bearer test-key" }]);
+  });
+
   it("throws a terse error on HTTP failure", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("nope", { status: 429 })));
     const llm = new OpenAiCompatibleLlm({

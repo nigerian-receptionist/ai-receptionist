@@ -35,6 +35,16 @@ export class OpenAiCompatibleLlm implements LlmClient {
     this.onSkippedPayload = opts.onSkippedPayload ?? null;
   }
 
+  /** Best-effort warmup: a cheap `GET /models` opens TLS + keep-alive early. */
+  async prewarm(): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    await response.text().catch(() => undefined);
+    if (!response.ok) throw new Error(`llm prewarm http ${response.status}`);
+  }
+
   async *streamChat(
     messages: ChatMessage[],
     opts: { signal?: AbortSignal; maxTokens?: number } = {},

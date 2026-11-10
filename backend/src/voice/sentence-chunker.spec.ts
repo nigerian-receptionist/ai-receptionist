@@ -15,12 +15,17 @@ const CASES: [input: string, expected: string[]][] = [
   ["J. K. Rowling writes books. Yes.", ["J. K. Rowling writes books.", "Yes."]],
   ["Acme Ltd. headquarters are here. Good.", ["Acme Ltd. headquarters are here.", "Good."]],
   ["Mr. Smith Sr. arrived today. Welcome.", ["Mr. Smith Sr. arrived today.", "Welcome."]],
+  // M28: the first clause splits early (6+ words); later commas keep the 60-char rule.
   [
     "Your balance is twelve thousand naira, and your next payment is due soon, please confirm.",
     [
-      "Your balance is twelve thousand naira, and your next payment is due soon,",
-      "please confirm.",
+      "Your balance is twelve thousand naira,",
+      "and your next payment is due soon, please confirm.",
     ],
+  ],
+  [
+    "Hello there my good old friend, how are you today?",
+    ["Hello there my good old friend,", "how are you today?"],
   ],
   [
     "This is a very long opening clause that keeps going past the limit, then it finally breaks here.",
@@ -61,6 +66,28 @@ describe("SentenceChunker streaming", () => {
       "and then proceed.",
     ]);
     expect(chunker.flush()).toEqual(["Thanks"]);
+  });
+
+  it("flushIfTerminal emits a terminal-complete tail without lookahead", () => {
+    const chunker = new SentenceChunker();
+    expect(chunker.push("Hello there.")).toEqual([]);
+    expect(chunker.flushIfTerminal()).toEqual(["Hello there."]);
+    expect(chunker.flush()).toEqual([]);
+  });
+
+  it("flushIfTerminal holds abbreviation, initial and mid-number tails", () => {
+    for (const tail of ["Call Mr.", "For J.", "It costs 2."]) {
+      const chunker = new SentenceChunker();
+      expect(chunker.push(tail)).toEqual([]);
+      expect(chunker.flushIfTerminal()).toEqual([]);
+      expect(chunker.pending).toContain(tail.trim());
+    }
+  });
+
+  it("flushIfTerminal ignores a non-terminal tail", () => {
+    const chunker = new SentenceChunker();
+    expect(chunker.push("Hello there")).toEqual([]);
+    expect(chunker.flushIfTerminal()).toEqual([]);
   });
 
   it("never splits thousand,000 spread across deltas in a long clause", () => {

@@ -86,8 +86,13 @@ class FakeSttSession implements SttStreamSession {
 class FakeStt implements SpeechToText {
   readonly modelId = "stt_fake@test";
   sessions: FakeSttSession[] = [];
+  /** When set, startSession parks until the gate opens (M30 tests). */
+  startGate: Promise<void> | null = null;
+  startEntered = false;
   constructor(private readonly finals: string[]) {}
   async startSession(): Promise<SttStreamSession> {
+    this.startEntered = true;
+    if (this.startGate) await this.startGate;
     const session = new FakeSttSession(this.finals);
     this.sessions.push(session);
     return session;
@@ -114,6 +119,7 @@ class FakeTtsSession implements TtsStreamSession {
     private gate: Promise<void> | null = null,
     private readonly spokenLog: string[] | null = null,
     private readonly gateFor: ((text: string) => Promise<void> | null) | null = null,
+    private readonly speakDelayMs = 0,
   ) {}
   async *speak(
     text: string,
@@ -122,6 +128,7 @@ class FakeTtsSession implements TtsStreamSession {
     this.spokenLog?.push(text);
     if (this.activeContexts.has(opts.contextId)) throw new Error("duplicate tts context id");
     this.activeContexts.add(opts.contextId);
+    if (this.speakDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.speakDelayMs));
     try {
       const found = this.canned.get(text);
       const pcm = found?.pcm ?? makePcm(0.3);
@@ -163,13 +170,17 @@ class FakeTts implements TextToSpeech {
   readonly modelId = "tts_fake@test";
   readonly spoken: string[] = [];
   readonly ttsSession: FakeTtsSession;
+  /** When set, startSession parks until the gate opens (M30 tests). */
+  startGate: Promise<void> | null = null;
+  startEntered = false;
   constructor(
     canned: Map<string, FakeUtterance> = new Map(),
     gate: Promise<void> | null = null,
     private readonly blockSeconds = 0.05,
     gateFor: ((text: string) => Promise<void> | null) | null = null,
+    speakDelayMs = 0,
   ) {
-    this.ttsSession = new FakeTtsSession(canned, gate, this.spoken, gateFor);
+    this.ttsSession = new FakeTtsSession(canned, gate, this.spoken, gateFor, speakDelayMs);
   }
   voices() {
     return [{ voiceId: "fake-voice", language: "en", gender: "unspecified", tones: ["neutral"] }];
@@ -199,6 +210,8 @@ class FakeTts implements TextToSpeech {
     };
   }
   async startSession(): Promise<TtsStreamSession> {
+    this.startEntered = true;
+    if (this.startGate) await this.startGate;
     return this.ttsSession;
   }
 }
@@ -206,17 +219,30 @@ class FakeTts implements TextToSpeech {
 class FakeLlm implements LlmClient {
   readonly model = "llm_fake@test";
   readonly seenMessages: ChatMessage[][] = [];
+  /** Replies whose streams ran to completion (M27 pipelining tests). */
+  readonly finishedReplies: string[] = [];
+  /** When set, the stream parks after yielding word `afterWords` (M28 tests). */
+  barrier: { afterWords: number; gate: Promise<void> } | null = null;
   constructor(readonly replies: string[]) {}
   async *streamChat(messages: ChatMessage[], opts: { signal?: AbortSignal }): AsyncIterable<LlmEvent> {
     this.seenMessages.push(messages);
     const reply = this.replies.shift() ?? "Okay.";
-    for (const word of reply.split(" ")) {
+    const words = reply.split(" ");
+    for (let i = 0; i < words.length; i += 1) {
       if (opts.signal?.aborted) throw aborted();
       await tick();
       if (opts.signal?.aborted) throw aborted();
-      yield { kind: "delta", text: `${word} ` };
+      const bare = i === words.length - 1 || (this.barrier !== null && i === this.barrier.afterWords);
+      yield { kind: "delta", text: bare ? (words[i] as string) : `${words[i]} ` };
+      if (this.barrier !== null && i === this.barrier.afterWords) {
+        const gate = this.barrier.gate;
+        this.barrier = null;
+        await gate;
+        if (opts.signal?.aborted) throw aborted();
+      }
     }
     yield { kind: "usage", usage: { in: 10, out: 5, reasoning: 2 } };
+    this.finishedReplies.push(reply);
   }
 }
 
@@ -249,6 +275,7 @@ function makeHarness(opts: {
   ttsCanned?: Map<string, FakeUtterance>;
   ttsGate?: Promise<void> | null;
   ttsGateFor?: ((text: string) => Promise<void> | null) | null;
+  ttsSpeakDelayMs?: number;
   blockSeconds?: number;
   config?: Partial<VoiceSessionConfig>;
 } = {}): Harness {
@@ -257,7 +284,13 @@ function makeHarness(opts: {
   const logs: Record<string, unknown>[] = [];
   const store = new InMemoryInteractionStore();
   const stt = new FakeStt(opts.sttFinals ?? []);
-  const tts = new FakeTts(opts.ttsCanned, opts.ttsGate ?? null, opts.blockSeconds, opts.ttsGateFor ?? null);
+  const tts = new FakeTts(
+    opts.ttsCanned,
+    opts.ttsGate ?? null,
+    opts.blockSeconds,
+    opts.ttsGateFor ?? null,
+    opts.ttsSpeakDelayMs ?? 0,
+  );
   const llm = new FakeLlm(opts.llmReplies ?? []);
   const blocks = new BlockRenderer(tts, mkdtempSync(join(tmpdir(), "blocks-")));
   const session = new VoiceSession({
@@ -274,6 +307,7 @@ function makeHarness(opts: {
       silencePromptAfterMs: 60_000,
       silenceEndAfterMs: 60_000,
       noticeAckTimeoutMs: 5000,
+      sentenceIdleFlushMs: 120,
       ...opts.config,
     },
     send: (message) => sent.push(message),
@@ -814,6 +848,138 @@ describe("VoiceSession", () => {
     expect(h.session.currentState).toBe("listening");
     const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
     expect(turns.filter((t) => t.speaker === "agent")).toHaveLength(0);
+  });
+
+  it("M27: the LLM stream is not backpressured by slow TTS (order kept)", async () => {
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const h = makeHarness({
+      sttFinals: ["Hi."],
+      llmReplies: ["First sentence here. Second sentence here."],
+      ttsGate: gate,
+    });
+    await completeNotice(h);
+    const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    // The LLM run completes while TTS for sentence 1 is still parked...
+    await vi.waitFor(() => expect(h.llm.finishedReplies).toHaveLength(1));
+    // ...and sentence 2 has not started speaking yet (ordered queue).
+    expect(h.tts.spoken).toEqual(["First sentence here."]);
+    openGate();
+    await turn;
+    // ...and audio still comes out in sentence order.
+    expect(h.tts.spoken).toEqual(["First sentence here.", "Second sentence here."]);
+    expect(h.session.currentState).toBe("listening");
+  });
+
+  it("M28: TTS starts on the first sentence while the LLM is stalled", async () => {
+    let openBarrier!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      openBarrier = resolve;
+    });
+    const h = makeHarness({
+      sttFinals: ["Hi."],
+      llmReplies: ["Hello there. Second part here."],
+    });
+    h.llm.barrier = { afterWords: 1, gate: barrier };
+    await completeNotice(h);
+    const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    await vi.waitFor(() => {
+      expect(h.sent.some((m) => m.type === "transcript.final")).toBe(true);
+    });
+    const turnId = currentTurnId(h);
+    // The stream stalls after "there." (no lookahead): the idle flush speaks
+    // sentence 1 without waiting for the rest of the stream.
+    await vi.waitFor(() => {
+      expect(
+        h.sent.some((m) => m.type === "agent.audio" && (m as { utteranceId: string }).utteranceId === turnId),
+      ).toBe(true);
+    });
+    expect(h.tts.spoken).toEqual(["Hello there."]);
+    openBarrier();
+    await turn;
+    expect(h.tts.spoken).toEqual(["Hello there.", "Second part here."]);
+    expect(h.session.currentState).toBe("listening");
+  });
+
+  it("M29: the caller-turn write runs off the first-audio path", async () => {
+    const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello there."] });
+    await completeNotice(h);
+    let releaseCaller!: () => void;
+    const callerGate = new Promise<void>((resolve) => {
+      releaseCaller = resolve;
+    });
+    const origAppend = h.store.appendTurn.bind(h.store);
+    const order: string[] = [];
+    vi.spyOn(h.store, "appendTurn").mockImplementation(async (tenantId, turn) => {
+      if (turn.speaker === "caller") await callerGate;
+      order.push(turn.speaker);
+      return origAppend(tenantId, turn);
+    });
+    const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    // The LLM pipeline starts while the caller write is still parked...
+    await vi.waitFor(() => expect(h.llm.seenMessages).toHaveLength(1));
+    releaseCaller();
+    await turn;
+    // ...and the caller write still lands before the agent write.
+    expect(order).toEqual(["caller", "agent"]);
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns.map((t) => t.seq)).toEqual([1, 2]);
+  });
+
+  it("M30: the TTS connect overlaps the disclosure render", async () => {
+    const h = makeHarness();
+    const renders: string[] = [];
+    const origRender = h.blocks.render.bind(h.blocks);
+    vi.spyOn(h.blocks, "render").mockImplementation(async (block, opts) => {
+      renders.push(block.id);
+      return origRender(block, opts);
+    });
+    let openTts!: () => void;
+    h.tts.startGate = new Promise<void>((resolve) => {
+      openTts = resolve;
+    });
+    const starting = h.session.handleMessage(START);
+    // The disclosure render starts while the TTS connect is still pending.
+    await vi.waitFor(() => expect(renders).toContain("disclose_ai"));
+    expect(h.tts.startEntered).toBe(true);
+    openTts();
+    await starting;
+    expect(h.session.currentState).toBe("notice");
+  });
+
+  it("M30: session start does not wait for the STT connect", async () => {
+    const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello."] });
+    let openStt!: () => void;
+    h.stt.startGate = new Promise<void>((resolve) => {
+      openStt = resolve;
+    });
+    await completeNotice(h);
+    expect(h.session.currentState).toBe("listening");
+    // The first turn parks on STT readiness, then proceeds once connected.
+    const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(h.llm.seenMessages).toHaveLength(0);
+    openStt();
+    await turn;
+    expect(h.sent.filter((m) => m.type === "transcript.final")).toHaveLength(1);
+    expect(h.session.currentState).toBe("listening");
+  });
+
+  it("M31: llm_total excludes TTS; the TTS span is recorded separately", async () => {
+    const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello there."], ttsSpeakDelayMs: 200 });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    const metrics = h.sent.find((m) => m.type === "turn.metrics");
+    expect(metrics?.type).toBe("turn.metrics");
+    if (metrics?.type !== "turn.metrics") throw new Error("no metrics");
+    expect(metrics.timingsMs.llm_total).toBeLessThan(200);
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns.find((t) => t.speaker === "agent")?.timingsMs.tts_total).toBeGreaterThanOrEqual(150);
+    expect(h.logs.find((l) => l["msg"] === "turn.completed")).toMatchObject({
+      tts_total_ms: expect.any(Number),
+    });
   });
 
   it("prompts on silence, then ends the session", async () => {

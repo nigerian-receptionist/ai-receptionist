@@ -34,6 +34,8 @@ export interface VoiceSessionConfig {
   silencePromptAfterMs: number;
   silenceEndAfterMs: number;
   noticeAckTimeoutMs: number;
+  /** M28: LLM-stall delay before a terminal-complete sentence starts TTS. */
+  sentenceIdleFlushMs: number;
 }
 
 export const DEFAULT_VOICE_SESSION_CONFIG: VoiceSessionConfig = {
@@ -43,6 +45,7 @@ export const DEFAULT_VOICE_SESSION_CONFIG: VoiceSessionConfig = {
   silencePromptAfterMs: 8000,
   silenceEndAfterMs: 20000,
   noticeAckTimeoutMs: 30000,
+  sentenceIdleFlushMs: 120,
 };
 
 export interface VoiceSessionDeps {
@@ -106,6 +109,7 @@ export class VoiceSession {
   private agent: { agentId: string; orgName: string; personaPrompt: string; voiceId: string; language: string } | null =
     null;
   private sttSession: SttStreamSession | null = null;
+  private sttReady: Promise<SttStreamSession> | null = null;
   private ttsSession: TtsStreamSession | null = null;
   private history: ChatMessage[] = [];
   private seq = 0;
@@ -220,34 +224,62 @@ export class VoiceSession {
       llmModel: this.deps.llm.model,
     });
     this.setState("notice");
-    // Warm up sequentially: the speech plan allows only 2 concurrent requests,
-    // so a burst of connects + renders would be throttled (HTTP 429).
-    const sttSession = await this.deps.stt.startSession({ sampleRate: 16000, language: "en" });
-    const ttsSession = await this.deps.tts.startSession({ sampleRate: this.deps.config.outputSampleRate });
-    const disclosure = await this.deps.blocks.render(DISCLOSE_AI_BLOCK, {
-      orgName: this.agent.orgName,
-      voiceId: this.agent.voiceId,
-    });
-    // Pre-render the remaining blocks in the background (also sequentially);
-    // every play path re-renders on demand, so a background failure only costs latency.
-    void this.preRenderBackgroundBlocks().catch((error: unknown) =>
-      this.deps.log({ msg: "blocks.prerender_failed", error: errorMessage(error) }),
-    );
+    // M30: overlap the TTS connect with the disclosure REST render (at most 2
+    // concurrent Cartesia calls on this plan). STT connects while the notice
+    // plays and is awaited lazily on the first turn instead of blocking
+    // first audio.
+    const [ttsSession, disclosure] = await Promise.all([
+      this.deps.tts.startSession({ sampleRate: this.deps.config.outputSampleRate }),
+      this.deps.blocks.render(DISCLOSE_AI_BLOCK, {
+        orgName: this.agent.orgName,
+        voiceId: this.agent.voiceId,
+      }),
+    ]);
     if (this.ended) {
-      await sttSession.close().catch(() => undefined);
       await ttsSession.close().catch(() => undefined);
       return;
     }
-    this.sttSession = sttSession;
     this.ttsSession = ttsSession;
-    sttSession.onEvent((event) => {
-      if (this.ended) return;
-      if (event.kind === "partial" && event.text !== "") this.deps.send({ type: "transcript.partial", text: event.text });
-    });
+    // Warm the LLM connection during the notice handshake (best effort).
+    void this.deps.llm.prewarm?.().catch((error: unknown) =>
+      this.deps.log({ msg: "llm.prewarm_failed", error: errorMessage(error) }),
+    );
+    this.sttReady = this.connectStt();
+    // Pre-render the remaining blocks in the background (notice first, so the
+    // disclosure->notice gap never waits on synthesis); every play path
+    // re-renders on demand, so a background failure only costs latency.
+    void this.preRenderBackgroundBlocks().catch((error: unknown) =>
+      this.deps.log({ msg: "blocks.prerender_failed", error: errorMessage(error) }),
+    );
     this.noticeStage = "disclosure";
     this.startNoticeTimer();
     await this.playBlock("notice-disclosure", disclosure);
     this.starting = false;
+  }
+
+  /** Start an STT session; assigns it when ready, clears the promise on failure. */
+  private connectStt(): Promise<SttStreamSession> {
+    const ready = this.deps.stt.startSession({ sampleRate: 16000, language: "en" });
+    ready.then(
+      (session) => {
+        if (!this.ended && this.sttReady === ready) {
+          this.sttSession = session;
+          session.onEvent((event) => {
+            if (this.ended) return;
+            if (event.kind === "partial" && event.text !== "") {
+              this.deps.send({ type: "transcript.partial", text: event.text });
+            }
+          });
+        } else {
+          void session.close().catch(() => undefined);
+        }
+      },
+      () => {
+        // Next turn reconnects; the failed turn goes through recover.
+        if (this.sttReady === ready) this.sttReady = null;
+      },
+    );
+    return ready;
   }
 
   private async preRenderBackgroundBlocks(): Promise<void> {
@@ -450,7 +482,7 @@ export class VoiceSession {
 
   private async handleSpeechEnded(): Promise<void> {
     this.silencePrompted = false;
-    if (this.state !== "listening" || !this.sttSession || !this.ttsSession) return;
+    if (this.state !== "listening" || !this.ttsSession) return;
     const tSpeechEnded = performance.now();
     const turnId = randomUUID();
     const myTurn = ++this.turnSeq;
@@ -463,6 +495,18 @@ export class VoiceSession {
       end_to_first_audio: null,
     };
     try {
+      // M30: STT connects during the notice; await it here (reconnecting on
+      // failure) so a slow connect never blocks session start.
+      if (!this.sttSession) {
+        this.sttReady ??= this.connectStt();
+        try {
+          this.sttSession = await this.sttReady;
+        } catch (error) {
+          this.sttReady = null;
+          this.sttSession = null;
+          throw error;
+        }
+      }
       const sttResult = await this.sttSession.finalize();
       if (myTurn !== this.turnSeq || this.ended) return;
       const tSttFinal = performance.now();
@@ -481,9 +525,38 @@ export class VoiceSession {
         this.recordingObjection = true;
         this.deps.log({ msg: "recording.objection", interactionId: this.interactionId });
       }
-      await this.appendCallerTurn(callerText, sttResult);
+      // M29: history and seq update synchronously; the caller-turn DB write
+      // runs concurrently with the LLM/TTS pipeline and lands before the
+      // agent write (ordering by seq). Errors surface after the pipeline.
+      const agent = this.agent as NonNullable<typeof this.agent>;
+      this.history.push({ role: "user", content: callerText });
+      this.trimHistory();
+      this.seq += 1;
+      const callerSeq = this.seq;
+      let callerWriteError: unknown = null;
+      const callerWriteDone = this.recordingObjection
+        ? Promise.resolve()
+        : this.deps.store
+            .appendTurn(this.deps.tenantId, {
+              interactionId: this.interactionId as string,
+              seq: callerSeq,
+              speaker: "caller",
+              text: callerText,
+              language: agent.language,
+              interrupted: false,
+              sttModelId: sttResult.modelId,
+              sttConfidence: sttResult.confidence,
+              timingsMs: {},
+            })
+            .then(() => undefined)
+            .catch((error: unknown) => {
+              callerWriteError = error;
+            });
       if (myTurn !== this.turnSeq || this.ended) return;
-      await this.runAgentTurn(turnId, myTurn, tSpeechEnded, tSttFinal, timings);
+      await this.runAgentTurn(turnId, myTurn, tSpeechEnded, tSttFinal, timings, {
+        done: callerWriteDone,
+        error: () => callerWriteError,
+      });
     } catch (error) {
       if (myTurn !== this.turnSeq || this.ended) return;
       throw error;
@@ -496,6 +569,7 @@ export class VoiceSession {
     tSpeechEnded: number,
     tSttFinal: number,
     timings: TurnTimingsMs,
+    callerWrite: { done: Promise<void>; error: () => unknown },
   ): Promise<void> {
     const agent = this.agent as NonNullable<typeof this.agent>;
     const ttsSession = this.ttsSession as TtsStreamSession;
@@ -524,8 +598,42 @@ export class VoiceSession {
     let audioSeq = 0;
     let ttsFirstAt = 0;
     let firstAudioSentAt = 0;
+    let ttsStartAt = 0;
+    let ttsDoneAt = 0;
     let sentenceIndex = 0;
+    // M27: sentences queue onto a sequential chain instead of blocking the
+    // LLM loop, so TTS for sentence N runs while the LLM keeps generating.
+    // Order is preserved; staleness is checked per task for barge-in.
+    let speakChain = Promise.resolve();
+    const speakErrors: unknown[] = [];
+    const queueSentence = (sentence: string): void => {
+      speakChain = speakChain.then(async () => {
+        if (myTurn !== this.turnSeq || this.ended || speakErrors.length > 0) return;
+        try {
+          await speakSentence(sentence);
+        } catch (error) {
+          speakErrors.push(error);
+        }
+      });
+    };
+    // M28: when the LLM stalls on a terminal-complete sentence, start TTS
+    // without waiting for the rest of the stream.
+    let idleTimer: NodeJS.Timeout | null = null;
+    const clearIdle = (): void => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = null;
+    };
+    const armIdle = (): void => {
+      clearIdle();
+      idleTimer = setTimeout(() => {
+        idleTimer = null;
+        if (myTurn !== this.turnSeq || this.ended) return;
+        for (const sentence of chunker.flushIfTerminal()) queueSentence(sentence);
+      }, this.deps.config.sentenceIdleFlushMs);
+      idleTimer.unref?.();
+    };
     const speakSentence = async (sentence: string): Promise<void> => {
+      if (myTurn !== this.turnSeq || this.ended) return;
       // F3/M19: screen the raw LLM sentence for sensitive values BEFORE
       // normalisation (which would expand digits into words) and synthesis.
       const policy = applySpeakPolicy(sentence);
@@ -534,6 +642,7 @@ export class VoiceSession {
       }
       const spoken = normaliseForSpeech(policy.safe);
       if (spoken === "") return;
+      if (ttsStartAt === 0) ttsStartAt = performance.now();
       // F3: the client transcript gets the screened sentence, never raw LLM
       // deltas, so echoed PII never reaches the browser either.
       this.deps.send({ type: "agent.text", utteranceId: turnId, delta: `${policy.safe} `, kind: "speech" });
@@ -577,6 +686,7 @@ export class VoiceSession {
           entry.words.push(...event.words);
         }
       }
+      ttsDoneAt = performance.now();
     };
 
     try {
@@ -592,29 +702,40 @@ export class VoiceSession {
         }
         rawReply += event.text;
         this.activeRawReply = rawReply;
-        for (const sentence of chunker.push(event.text)) {
-          await speakSentence(sentence);
-          if (myTurn !== this.turnSeq || this.ended) return;
-        }
-      }
-      timings.llm_total = Math.round(performance.now() - tSttFinal);
-      for (const sentence of chunker.flush()) {
-        await speakSentence(sentence);
+        for (const sentence of chunker.push(event.text)) queueSentence(sentence);
         if (myTurn !== this.turnSeq || this.ended) return;
+        armIdle();
       }
+      // M31: llm_total covers the LLM stream only, never queued TTS work.
+      timings.llm_total = Math.round(performance.now() - tSttFinal);
+      clearIdle();
+      for (const sentence of chunker.flush()) queueSentence(sentence);
+      if (myTurn !== this.turnSeq || this.ended) return;
+      await speakChain;
+      if (myTurn !== this.turnSeq || this.ended) return;
+      if (speakErrors.length > 0) throw speakErrors[0];
     } catch (error) {
       if (myTurn !== this.turnSeq || this.ended) return;
       throw error;
     } finally {
+      clearIdle();
       // M4: only clear when the next turn has not already replaced them.
       if (this.llmAbort === llmAbort) this.llmAbort = null;
       if (this.ttsAbort === ttsAbort) this.ttsAbort = null;
     }
     if (myTurn !== this.turnSeq || this.ended) return;
+    // M29: land the concurrent caller write before the agent write.
+    await callerWrite.done;
+    if (myTurn !== this.turnSeq || this.ended) return;
+    const callerError = callerWrite.error();
+    if (callerError) throw callerError;
     utterance.done = true;
     this.activeTimings = null;
     this.activeRawReply = "";
     const spokenText = utterance.sentences.map((s) => s.sentence).join(" ");
+    // M31: TTS span lives in the store record and logs (the wire protocol's
+    // TurnTimingsMs is frozen, so turn.metrics keeps the agreed fields).
+    const ttsTotal = ttsStartAt === 0 ? null : Math.round(ttsDoneAt - ttsStartAt);
     this.deps.send({ type: "agent.audio.end", utteranceId: turnId });
     this.deps.send({ type: "turn.metrics", turnId, timingsMs: timings });
     this.history.push({ role: "assistant", content: spokenText });
@@ -633,11 +754,11 @@ export class VoiceSession {
         promptVersion: VOICE_SYSTEM_PROMPT_VERSION,
         ttsModelId: this.deps.tts.modelId,
         voiceId: agent.voiceId,
-        timingsMs: { ...timings },
+        timingsMs: { ...timings, tts_total: ttsTotal },
         tokens: usage,
       });
     }
-    this.logTurn(timings, false);
+    this.logTurn(timings, false, ttsTotal);
     // M5: the last byte is SENT here, not heard: retain currentUtteranceId
     // until playback.done so a playout-tail barge-in still cancels the audio
     // and truncates history to what was heard (AGENTS.md 10.2).
@@ -855,10 +976,12 @@ export class VoiceSession {
       this.deps.send({ type: "error", code: opts.fatal.code, message: opts.fatal.message, fatal: true });
     }
     if (!opts.quiet) this.setState("ended");
-    await Promise.all([
-      this.sttSession?.close().catch(() => undefined),
-      this.ttsSession?.close().catch(() => undefined),
-    ]);
+    // M30: the STT connect may still be in flight; close it when it lands.
+    const sttClose = this.sttSession
+      ? this.sttSession.close().catch(() => undefined)
+      : this.sttReady?.then((session) => session.close()).catch(() => undefined);
+    await Promise.all([sttClose, this.ttsSession?.close().catch(() => undefined)]);
+    this.sttReady = null;
     this.sttSession = null;
     this.ttsSession = null;
     if (this.interactionId !== null) {
@@ -891,29 +1014,7 @@ export class VoiceSession {
     if (this.history.length > max) this.history.splice(0, this.history.length - max);
   }
 
-  private async appendCallerTurn(
-    callerText: string,
-    sttResult: { modelId: string; confidence: number | null },
-  ): Promise<void> {
-    const agent = this.agent as NonNullable<typeof this.agent>;
-    this.history.push({ role: "user", content: callerText });
-    this.trimHistory();
-    this.seq += 1;
-    if (this.recordingObjection) return;
-    await this.deps.store.appendTurn(this.deps.tenantId, {
-      interactionId: this.interactionId as string,
-      seq: this.seq,
-      speaker: "caller",
-      text: callerText,
-      language: agent.language,
-      interrupted: false,
-      sttModelId: sttResult.modelId,
-      sttConfidence: sttResult.confidence,
-      timingsMs: {},
-    });
-  }
-
-  private logTurn(timings: TurnTimingsMs, interrupted: boolean): void {
+  private logTurn(timings: TurnTimingsMs, interrupted: boolean, ttsTotal: number | null = null): void {
     // Ids and timings only: never transcript text, never keys.
     this.deps.log({
       msg: "turn.completed",
@@ -924,6 +1025,7 @@ export class VoiceSession {
       llm_first_token_ms: timings.llm_first_token,
       llm_total_ms: timings.llm_total,
       tts_first_audio_ms: timings.tts_first_audio,
+      tts_total_ms: ttsTotal,
       end_to_first_audio_ms: timings.end_to_first_audio,
     });
   }

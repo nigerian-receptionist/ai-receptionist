@@ -16,9 +16,12 @@ const ABBREVIATIONS = new Set([
 
 /** A comma becomes a boundary once the current segment exceeds this length. */
 export const LONG_COMMA_CHARS = 60;
+/** M28: the FIRST clause may split at a comma once it reaches this many words. */
+export const FIRST_CLAUSE_WORDS = 6;
 
 export class SentenceChunker {
   private buffer = "";
+  private firstEmissionDone = false;
 
   /** Feed an LLM delta; returns newly completed sentences (trimmed, non-empty). */
   push(delta: string): string[] {
@@ -29,6 +32,31 @@ export class SentenceChunker {
   /** Emit whatever remains, even without terminal punctuation. */
   flush(): string[] {
     return this.drain(true);
+  }
+
+  /**
+   * M28: emit the pending tail when it is terminal-complete ("Hello there."
+   * with no lookahead yet), so an LLM stall does not delay TTS. Holds
+   * abbreviation, initial and mid-number tails conservatively.
+   */
+  flushIfTerminal(): string[] {
+    const trimmed = this.buffer.trim();
+    if (trimmed === "") return [];
+    const match = /[.!?]+["')\]]*\s*$/.exec(trimmed);
+    if (!match || match.index === 0) return [];
+    const punctAt = match.index;
+    const punct = trimmed[punctAt] as string;
+    const before = punctAt > 0 ? (trimmed[punctAt - 1] as string) : "";
+    // Mid-number ("2." + "30" still coming): wait.
+    if (punct === "." && isDigit(before)) return [];
+    if (punct === ".") {
+      const { token, raw } = tokenBefore(trimmed, punctAt);
+      if (ABBREVIATIONS.has(token)) return [];
+      if (/^[A-Z]$/.test(raw)) return [];
+    }
+    this.buffer = "";
+    this.firstEmissionDone = true;
+    return [trimmed];
   }
 
   /** What is still buffered (useful for debugging, not for display). */
@@ -44,18 +72,26 @@ export class SentenceChunker {
       const char = this.buffer[i] as string;
       if (char === "\n") {
         const sentence = this.buffer.slice(start, i).trim();
-        if (sentence !== "") sentences.push(sentence);
+        if (sentence !== "") {
+          sentences.push(sentence);
+          this.firstEmissionDone = true;
+        }
         start = i + 1;
         i += 1;
         continue;
       }
       if (char === ",") {
+        const longEnough = i - start >= LONG_COMMA_CHARS;
+        // M28: start TTS on the first clause early (still needs lookahead).
+        const firstClause =
+          !this.firstEmissionDone && countWords(this.buffer, start, i) >= FIRST_CLAUSE_WORDS;
         if (
-          i - start >= LONG_COMMA_CHARS &&
+          (longEnough || firstClause) &&
           !isDigitRun(this.buffer, i) &&
           isCommaBoundaryAfter(this.buffer, i + 1)
         ) {
           sentences.push(this.buffer.slice(start, i + 1).trim());
+          this.firstEmissionDone = true;
           start = i + 1;
         }
         i += 1;
@@ -66,6 +102,7 @@ export class SentenceChunker {
         if (isSentenceEnd(this.buffer, i, runEnd)) {
           const end = consumeClosers(this.buffer, runEnd);
           sentences.push(this.buffer.slice(start, end).trim());
+          this.firstEmissionDone = true;
           start = end;
           i = end;
           continue;
@@ -84,6 +121,12 @@ export class SentenceChunker {
     }
     return sentences;
   }
+}
+
+function countWords(text: string, start: number, end: number): number {
+  const segment = text.slice(start, end).trim();
+  if (segment === "") return 0;
+  return segment.split(/\s+/).length;
 }
 
 function consumeRun(text: string, i: number): number {

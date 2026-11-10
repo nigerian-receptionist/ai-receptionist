@@ -150,4 +150,9 @@ export interface LlmClient {
     messages: ChatMessage[],
     opts: { signal?: AbortSignal; maxTokens?: number },
   ): AsyncIterable<LlmEvent>;
+  /**
+   * Best-effort connection warmup (TLS + HTTP keep-alive) ahead of the first
+   * turn. Failures are logged, never fatal.
+   */
+  prewarm?(): Promise<void>;
 }
