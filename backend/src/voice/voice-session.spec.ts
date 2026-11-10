@@ -1104,6 +1104,181 @@ describe("VoiceSession", () => {
     expect(final).toMatchObject({ text: long.trim() });
     expect(h.logs.some((l) => l.msg === "session.transcript_capped")).toBe(true);
   });
+
+  describe("silence window (heard-anchored)", () => {
+    const SENTENCE = "Hello there friend.";
+    /** Must match the implementation's backstop margin after the sent audio duration. */
+    const BACKSTOP_MARGIN_MS = 3000;
+
+    function hasSilencePrompt(h: Harness): boolean {
+      return h.sent.some(
+        (m) => m.type === "agent.text" && (m as { blockId?: string }).blockId === "silence_prompt",
+      );
+    }
+
+    function makeSilenceHarness(audioSeconds: number, sttFinals: string[] = ["Hi."]): Harness {
+      const canned = new Map<string, FakeUtterance>([
+        [SENTENCE, { pcm: makePcm(audioSeconds), words: [] }],
+      ]);
+      return makeHarness({
+        sttFinals,
+        llmReplies: [SENTENCE],
+        ttsCanned: canned,
+        config: { silencePromptAfterMs: 8000, silenceEndAfterMs: 20000 },
+      });
+    }
+
+    /** Run one caller turn through send-complete; returns the fake-time turn start. */
+    async function runTurn(h: Harness): Promise<number> {
+      const turnStart = Date.now();
+      await h.session.handleMessage({ type: "input.speech_started", atMs: 0 });
+      const turnDone = h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+      await vi.advanceTimersByTimeAsync(2000);
+      await turnDone;
+      expect(h.session.currentState).toBe("listening");
+      return turnStart;
+    }
+
+    it("no prompt while the reply is unacked past send+8s; prompt 8s after playback.done", async () => {
+      vi.useFakeTimers();
+      try {
+        const h = makeSilenceHarness(8);
+        await completeNotice(h);
+        await runTurn(h);
+        const turnId = currentTurnId(h);
+        // Send-complete was during the 2s pipeline advance, so this is 8-10s
+        // after send: past the 8s mark, still unacked. No prompt.
+        await vi.advanceTimersByTimeAsync(8000);
+        expect(hasSilencePrompt(h)).toBe(false);
+        // Caller hears the end now: the 8s window starts here.
+        await h.session.handleMessage({ type: "playback.done", utteranceId: turnId });
+        await vi.advanceTimersByTimeAsync(7900);
+        expect(hasSilencePrompt(h)).toBe(false);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(hasSilencePrompt(h)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("long reply (12s): never prompts during playout, never clobbers the turn id", async () => {
+      vi.useFakeTimers();
+      try {
+        const h = makeSilenceHarness(12);
+        await completeNotice(h);
+        await runTurn(h);
+        const turnId = currentTurnId(h);
+        // 8-10s after send, reply still playing: no prompt.
+        await vi.advanceTimersByTimeAsync(8000);
+        expect(hasSilencePrompt(h)).toBe(false);
+        // 12-14s after send, still unacked: no prompt (backstop is 12s+3s).
+        await vi.advanceTimersByTimeAsync(4000);
+        expect(hasSilencePrompt(h)).toBe(false);
+        // Tail barge-in still cancels the turn itself, not a clobbered id.
+        await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+        expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: turnId });
+        expect(hasSilencePrompt(h)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("missing playback.done: backstop starts the 8s window at duration+margin", async () => {
+      vi.useFakeTimers();
+      try {
+        const audioSeconds = 8;
+        const h = makeSilenceHarness(audioSeconds);
+        await completeNotice(h);
+        const turnStart = await runTurn(h);
+        // Send-complete t is in [turnStart, turnStart+2000]. Backstop fires at
+        // t+11000, prompt at t+19000. At turnStart+18900 neither has fired late:
+        // the prompt must still be absent...
+        await vi.advanceTimersByTimeAsync(turnStart + 18900 - Date.now());
+        expect(hasSilencePrompt(h)).toBe(false);
+        // ...but the backstop must have fired (it retires the unacked audio and
+        // starts the normal window, logging its use).
+        expect(h.logs.some((l) => l["msg"] === "silence.playback_backstop_used")).toBe(true);
+        // ...and the prompt follows a full 8s window after the backstop.
+        await vi.advanceTimersByTimeAsync(turnStart + 22000 - Date.now());
+        expect(hasSilencePrompt(h)).toBe(true);
+        expect(BACKSTOP_MARGIN_MS).toBe(3000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("barge-in followed by a long caller utterance is never talked over", async () => {
+      vi.useFakeTimers();
+      try {
+        const h = makeSilenceHarness(8);
+        await completeNotice(h);
+        await runTurn(h);
+        // Tail barge-in: the caller starts speaking while the reply plays.
+        await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+        // Caller keeps speaking for 10s (no speech_ended yet): no prompt.
+        await vi.advanceTimersByTimeAsync(10000);
+        expect(hasSilencePrompt(h)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("speech_started during the silence window cancels it", async () => {
+      vi.useFakeTimers();
+      try {
+        const h = makeSilenceHarness(8);
+        await completeNotice(h);
+        await runTurn(h);
+        const turnId = currentTurnId(h);
+        await h.session.handleMessage({ type: "playback.done", utteranceId: turnId });
+        await vi.advanceTimersByTimeAsync(4000);
+        await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+        await vi.advanceTimersByTimeAsync(10000);
+        expect(hasSilencePrompt(h)).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("notice idle prompt and prompt 20s end are unchanged (fake timers)", async () => {
+      vi.useFakeTimers();
+      try {
+        const h = makeHarness({ config: { silencePromptAfterMs: 8000, silenceEndAfterMs: 20000 } });
+        await completeNotice(h);
+        await vi.advanceTimersByTimeAsync(8000);
+        expect(hasSilencePrompt(h)).toBe(true);
+        await h.session.handleMessage({ type: "playback.done", utteranceId: "silence-prompt" });
+        expect(h.session.currentState).toBe("listening");
+        await vi.advanceTimersByTimeAsync(19900);
+        expect(h.closed).toHaveLength(0);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(h.closed).toHaveLength(1);
+        expect(h.store.interactions.get(h.interactionId())?.endReason).toBe("timeout");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("empty-transcript speech_ended still arms the silence window", async () => {
+      vi.useFakeTimers();
+      try {
+        const h = makeHarness({
+          sttFinals: ["  "],
+          config: { silencePromptAfterMs: 8000, silenceEndAfterMs: 20000 },
+        });
+        await completeNotice(h);
+        await h.session.handleMessage({ type: "input.speech_started", atMs: 0 });
+        await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+        expect(h.session.currentState).toBe("listening");
+        await vi.advanceTimersByTimeAsync(7900);
+        expect(hasSilencePrompt(h)).toBe(false);
+        await vi.advanceTimersByTimeAsync(500);
+        expect(hasSilencePrompt(h)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
 
 function currentTurnId(h: Harness): string {
