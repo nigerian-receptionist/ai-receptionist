@@ -44,6 +44,12 @@ export interface VoiceSessionConfig {
   maxBytesPerSec: number;
   /** Caller transcript chars sent to the LLM (the full text is still stored). */
   maxTranscriptChars: number;
+  /** Throwaway prefix-matching LLM request while the notice plays (env LLM_WARMUP_ENABLED). */
+  llmWarmupEnabled: boolean;
+  /** Play a pre-rendered ack when the first LLM token is slow (env ACK_ENABLED). */
+  ackEnabled: boolean;
+  /** First-token wait before the ack plays, in ms (env ACK_DELAY_MS). */
+  ackDelayMs: number;
 }
 
 export const DEFAULT_VOICE_SESSION_CONFIG: VoiceSessionConfig = {
@@ -59,6 +65,9 @@ export const DEFAULT_VOICE_SESSION_CONFIG: VoiceSessionConfig = {
   maxSessionS: 900,
   maxBytesPerSec: 64000,
   maxTranscriptChars: 2000,
+  llmWarmupEnabled: true,
+  ackEnabled: true,
+  ackDelayMs: 400,
 };
 
 export interface VoiceSessionDeps {
