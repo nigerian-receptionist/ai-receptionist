@@ -23,9 +23,12 @@ function originOf(raw: string | undefined, fallback: string): string {
 //   middleware lands. The policy still constrains everything else.
 // - COOP/COEP stay: SharedArrayBuffer (crossOriginIsolated) is required by
 //   the threaded ORT build.
+// - `next dev` (React Refresh, webpack eval source maps) needs `unsafe-eval`;
+//   it is added in development only, never to production builds.
+const devEval = process.env.NODE_ENV === "development" ? " 'unsafe-eval'" : "";
 const contentSecurityPolicy = [
   "default-src 'self'",
-  "script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'",
+  `script-src 'self' 'wasm-unsafe-eval' 'unsafe-inline'${devEval}`,
   "style-src 'self' 'unsafe-inline'",
   `connect-src 'self' ${voiceWsOrigin} ${apiOrigin}`,
   "worker-src 'self' blob:",
