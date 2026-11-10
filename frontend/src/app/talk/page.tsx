@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 
 import type { AgentState } from "@/features/talk/protocol";
+import { clampEndpointingSilenceMs } from "@/features/talk/speech-gate";
 import { useTalkSession } from "@/features/talk/use-talk-session";
 
 const STATE_LABELS: Record<AgentState, string> = {
@@ -19,7 +20,9 @@ export default function TalkPage() {
     () => ({
       wsUrl: process.env.NEXT_PUBLIC_VOICE_WS_URL ?? "ws://127.0.0.1:8000/v1/voice",
       token: process.env.NEXT_PUBLIC_DEV_ACCESS_TOKEN ?? "",
-      endpointingSilenceMs: Number(process.env.NEXT_PUBLIC_ENDPOINTING_SILENCE_MS ?? "600"),
+      endpointingSilenceMs: clampEndpointingSilenceMs(
+        process.env.NEXT_PUBLIC_ENDPOINTING_SILENCE_MS,
+      ),
     }),
     [],
   );
