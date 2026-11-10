@@ -52,7 +52,17 @@ export interface InteractionStore {
 
   appendTurn(tenantId: string, turn: TurnRecord): Promise<{ turnId: string }>;
 
-  endInteraction(tenantId: string, interactionId: string, endReason: EndReason): Promise<void>;
+  /**
+   * Closes the interaction. `complianceFlags` marks compliance-relevant
+   * outcomes for audit (e.g. `notice_failed` when the disclosure/notice was
+   * never confirmed — AGENTS.md 9.1 rule 2); omit for ordinary closes.
+   */
+  endInteraction(
+    tenantId: string,
+    interactionId: string,
+    endReason: EndReason,
+    opts?: { complianceFlags?: string[] },
+  ): Promise<void>;
 
   /** Loads the agent config the gateway needs (persona prompt, voice, language, org name). */
   getAgentForSession(

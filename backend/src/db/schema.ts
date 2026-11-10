@@ -89,6 +89,9 @@ export const interactions = pgTable(
     noticeBlockVersion: integer("notice_block_version"),
     noticeBlockHash: text("notice_block_hash"),
     noticeDeliveredAt: timestamp("notice_delivered_at", { withTimezone: true }),
+    // Compliance flags (e.g. "notice_failed" when the disclosure/notice was
+    // never confirmed). Set only via endInteraction; empty means no flags.
+    complianceFlags: jsonb("compliance_flags").$type<string[]>().notNull().default([]),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

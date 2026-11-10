@@ -106,6 +106,26 @@ describe("DrizzleInteractionStore round-trip (real Postgres, app role)", () => {
     expect(bySeq.get(2)?.spokenText).toBe("Thanks, I will send details to [EMAIL].");
   });
 
+  it("persists compliance flags on endInteraction (M21)", async () => {
+    const { interactionId } = await store.startInteraction({
+      tenantId,
+      agentId,
+      channel: "web_voice",
+      direction: "inbound",
+    });
+    await store.endInteraction(tenantId, interactionId, "error", {
+      complianceFlags: ["notice_failed"],
+    });
+    const rawId = toRawId(interactionId, "int");
+    const stored = await service.withTenant(tenantId, async (tx) => ({
+      interaction: (
+        await tx.select().from(interactions).where(eq(interactions.id, rawId)).limit(1)
+      )[0],
+    }));
+    expect(stored.interaction?.endReason).toBe("error");
+    expect(stored.interaction?.complianceFlags).toEqual(["notice_failed"]);
+  });
+
   it("refuses another tenant's agent", async () => {
     const other = await createTenantWithAgent(service, "Other Tenant Ltd");
     try {

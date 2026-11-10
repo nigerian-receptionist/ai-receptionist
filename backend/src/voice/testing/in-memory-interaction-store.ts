@@ -20,6 +20,7 @@ export interface StoredInteraction {
   noticeProof?: { blockId: string; blockVersion: number; blockHash: string; deliveredAt: Date };
   turns: (TurnRecord & { turnId: string })[];
   endReason: EndReason | null;
+  complianceFlags: string[];
 }
 
 /**
@@ -45,6 +46,7 @@ export class InMemoryInteractionStore implements InteractionStore {
       recordingState: "not_started",
       turns: [],
       endReason: null,
+      complianceFlags: [],
     });
     return { interactionId };
   }
@@ -67,8 +69,15 @@ export class InMemoryInteractionStore implements InteractionStore {
     return { turnId };
   }
 
-  async endInteraction(tenantId: string, interactionId: string, endReason: EndReason): Promise<void> {
-    this.get(tenantId, interactionId).endReason = endReason;
+  async endInteraction(
+    tenantId: string,
+    interactionId: string,
+    endReason: EndReason,
+    opts: { complianceFlags?: string[] } = {},
+  ): Promise<void> {
+    const interaction = this.get(tenantId, interactionId);
+    interaction.endReason = endReason;
+    if (opts.complianceFlags !== undefined) interaction.complianceFlags = opts.complianceFlags;
   }
 
   async getAgentForSession(

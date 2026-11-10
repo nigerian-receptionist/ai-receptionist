@@ -34,6 +34,7 @@ function toInteractionDto(row: InteractionRow) {
     direction: row.direction,
     status: row.status,
     endReason: row.endReason,
+    complianceFlags: row.complianceFlags,
     recordingState: row.recordingState,
     noticeBlockId: row.noticeBlockId,
     noticeBlockVersion: row.noticeBlockVersion,

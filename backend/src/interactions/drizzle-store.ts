@@ -122,6 +122,7 @@ export class DrizzleInteractionStore implements InteractionStore {
     tenantId: string,
     interactionId: string,
     endReason: EndReason,
+    opts: { complianceFlags?: string[] } = {},
   ): Promise<void> {
     if (!END_REASONS.includes(endReason)) throw new Error("Invalid end reason");
     const rawId = toRawId(interactionId, "int");
@@ -131,6 +132,7 @@ export class DrizzleInteractionStore implements InteractionStore {
         .set({
           status: "closed",
           endReason,
+          ...(opts.complianceFlags === undefined ? {} : { complianceFlags: opts.complianceFlags }),
           endedAt: new Date(),
           updatedAt: new Date(),
         })

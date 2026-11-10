@@ -98,6 +98,8 @@ export class VoiceSession {
   private readonly utterances = new Map<string, ActiveUtterance>();
   private currentUtteranceId: string | null = null;
   private noticeStage: "none" | "disclosure" | "notice" = "none";
+  /** True once the disclosure + notice handshake completed with proof. */
+  private noticeConfirmed = false;
   private noticeTimer: NodeJS.Timeout | null = null;
   private silenceTimer: NodeJS.Timeout | null = null;
   private silencePrompted = false;
@@ -250,9 +252,20 @@ export class VoiceSession {
   }
 
   private async failNotice(reason: string): Promise<void> {
-    if (this.ended || this.state !== "notice") return;
-    this.deps.log({ msg: "session.notice_failed", reason });
-    await this.endSession("error", { fatal: { code: "internal", message: "Notice playback was not confirmed." } });
+    if (this.ended || this.noticeConfirmed) return;
+    // AGENTS.md 9.1 rule 2: an unconfirmed notice is a compliance event, not
+    // an ordinary error. Flag the interaction for audit and alert. No audio
+    // is persisted in this milestone, so there is nothing to purge.
+    this.deps.log({
+      msg: "compliance.notice_failed",
+      alert: "compliance_reviewer",
+      reason,
+      interactionId: this.interactionId,
+    });
+    await this.endSession("error", {
+      fatal: { code: "internal", message: "Notice playback was not confirmed." },
+      complianceFlags: ["notice_failed"],
+    });
   }
 
   private async playBlock(utteranceId: string, rendered: RenderedBlock): Promise<void> {
@@ -321,6 +334,7 @@ export class VoiceSession {
           deliveredAt: new Date(),
         });
         await store.setRecordingState(tenantId, this.interactionId as string, "recording");
+        this.noticeConfirmed = true;
         this.setState("listening");
         this.armSilenceTimer();
         return;
@@ -574,9 +588,18 @@ export class VoiceSession {
 
   private async recover(reason: string): Promise<void> {
     if (this.ended) return;
+    if (!this.noticeConfirmed) {
+      // B1: before the notice handshake the hold path is forbidden — the
+      // caller must never hear other content or reach `listening` without
+      // disclosure + notice proof (AGENTS.md 9.1 rules 1-2). End flagged.
+      await this.failNotice(`recover before notice confirmed: ${reason}`);
+      return;
+    }
     if (!this.sttSession || !this.ttsSession || !this.interactionId) {
+      // F7: vendor/adapter detail stays server-side; the client gets a generic message.
+      this.deps.log({ msg: "session.start_failed", reason });
       await this.endSession("error", {
-        fatal: { code: "internal", message: `Voice session failed to start: ${reason}` },
+        fatal: { code: "internal", message: "Voice session failed to start." },
       });
       return;
     }
@@ -597,8 +620,10 @@ export class VoiceSession {
       this.setState("speaking");
       await this.playBlock("hold", hold);
     } catch (error) {
+      // F7: keep vendor detail server-side.
+      this.deps.log({ msg: "session.fallback_failed", error: errorMessage(error) });
       await this.endSession("error", {
-        fatal: { code: "internal", message: `Fallback audio failed: ${errorMessage(error)}` },
+        fatal: { code: "internal", message: "Speech processing failed; ending the call." },
       });
     }
   }
@@ -651,7 +676,11 @@ export class VoiceSession {
 
   private async endSession(
     reason: "caller_hangup" | "agent_ended" | "error" | "timeout",
-    opts: { quiet?: boolean; fatal?: { code: "bad_message" | "internal"; message: string } } = {},
+    opts: {
+      quiet?: boolean;
+      fatal?: { code: "bad_message" | "internal"; message: string };
+      complianceFlags?: string[];
+    } = {},
   ): Promise<void> {
     if (this.ended) return;
     this.ended = true;
@@ -673,7 +702,9 @@ export class VoiceSession {
     this.ttsSession = null;
     if (this.interactionId !== null) {
       await this.deps.store
-        .endInteraction(this.deps.tenantId, this.interactionId, reason)
+        .endInteraction(this.deps.tenantId, this.interactionId, reason, {
+          complianceFlags: opts.complianceFlags,
+        })
         .catch((error: unknown) => this.deps.log({ msg: "store.end_interaction_failed", error: errorMessage(error) }));
     }
     this.deps.close(1000, reason);

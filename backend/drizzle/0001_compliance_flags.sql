@@ -1,0 +1,1 @@
+ALTER TABLE "interactions" ADD COLUMN "compliance_flags" jsonb DEFAULT '[]'::jsonb NOT NULL;

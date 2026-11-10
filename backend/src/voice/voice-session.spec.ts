@@ -17,7 +17,7 @@ import type {
   TtsStreamSession,
   WordTiming,
 } from "./adapters/types";
-import { BlockRenderer } from "./blocks/block-cache";
+import { BlockRenderer, type BlockDefinition } from "./blocks/block-cache";
 import type { ClientMessage } from "./client-messages";
 import type { ServerMessage } from "./protocol";
 import { InMemoryInteractionStore } from "./testing/in-memory-interaction-store";
@@ -191,9 +191,11 @@ interface Harness {
   session: VoiceSession;
   sent: ServerMessage[];
   closed: { code: number; reason: string }[];
+  logs: Record<string, unknown>[];
   store: InMemoryInteractionStore;
   stt: FakeStt;
   llm: FakeLlm;
+  blocks: BlockRenderer;
   interactionId: () => string;
 }
 
@@ -206,6 +208,7 @@ function makeHarness(opts: {
 } = {}): Harness {
   const sent: ServerMessage[] = [];
   const closed: { code: number; reason: string }[] = [];
+  const logs: Record<string, unknown>[] = [];
   const store = new InMemoryInteractionStore();
   const stt = new FakeStt(opts.sttFinals ?? []);
   const tts = new FakeTts(opts.ttsCanned, opts.ttsGate ?? null);
@@ -229,15 +232,17 @@ function makeHarness(opts: {
     },
     send: (message) => sent.push(message),
     close: (code, reason) => closed.push({ code, reason }),
-    log: () => undefined,
+    log: (fields) => logs.push(fields),
   });
   return {
     session,
     sent,
     closed,
+    logs,
     store,
     stt,
     llm,
+    blocks,
     interactionId: () => {
       const id = session.currentInteractionId;
       if (!id) throw new Error("no interaction yet");
@@ -424,6 +429,59 @@ describe("VoiceSession", () => {
     expect(hold).toBeDefined();
     await h.session.handleMessage({ type: "playback.done", utteranceId: "hold" });
     expect(h.session.currentState).toBe("listening");
+  });
+
+  it("B1: a notice-stage failure ends the session, never hold+listen", async () => {
+    const h = makeHarness();
+    // The notice render fails (e.g. vendor 429/5xx), including the background prerender.
+    const render = h.blocks.render.bind(h.blocks);
+    vi.spyOn(h.blocks, "render").mockImplementation(
+      (block: BlockDefinition, opts: { orgName: string; voiceId: string }) => {
+        if (block.id === "recording_notice") return Promise.reject(new Error("tts 429 throttled"));
+        return render(block, opts);
+      },
+    );
+    await h.session.handleMessage(START);
+    expect(h.session.currentState).toBe("notice");
+
+    await h.session.handleMessage({ type: "playback.done", utteranceId: "notice-disclosure" });
+
+    // No hold audio, no listening: the session is over.
+    expect(h.session.currentState).toBe("ended");
+    expect(h.closed).toHaveLength(1);
+    expect(
+      h.sent.find((m) => m.type === "agent.text" && (m as { blockId?: string }).blockId === "hold"),
+    ).toBeUndefined();
+    expect(states(h)).not.toContain("listening");
+    const fatal = h.sent.find((m) => m.type === "error");
+    expect(fatal).toMatchObject({ fatal: true });
+    // Vendor detail stays server-side (F7).
+    expect((fatal as { message?: string }).message ?? "").not.toContain("429");
+    const interaction = h.store.interactions.get(h.interactionId());
+    expect(interaction?.endReason).toBe("error");
+    expect(interaction?.complianceFlags).toEqual(["notice_failed"]);
+    expect(h.logs.find((l) => l["msg"] === "compliance.notice_failed")).toMatchObject({
+      alert: "compliance_reviewer",
+    });
+  });
+
+  it("M21: a notice ack timeout flags the interaction and logs an alert", async () => {
+    const h = makeHarness({ config: { noticeAckTimeoutMs: 30 } });
+    await h.session.handleMessage(START);
+    expect(h.session.currentState).toBe("notice");
+
+    await vi.waitFor(() => expect(h.closed).toHaveLength(1));
+
+    expect(h.session.currentState).toBe("ended");
+    expect(states(h)).not.toContain("listening");
+    const interaction = h.store.interactions.get(h.interactionId());
+    expect(interaction?.endReason).toBe("error");
+    expect(interaction?.complianceFlags).toEqual(["notice_failed"]);
+    expect(interaction?.recordingState).not.toBe("recording");
+    expect(h.logs.find((l) => l["msg"] === "compliance.notice_failed")).toMatchObject({
+      alert: "compliance_reviewer",
+      reason: "notice ack timed out",
+    });
   });
 
   it("prompts on silence, then ends the session", async () => {
