@@ -65,11 +65,13 @@ prefixed or raw uuid form.
 WebSocket gateway at `/v1/voice` (protocol: `docs/contracts/voice-protocol.ts`).
 A browser client connects with `?token=<DEV_ACCESS_TOKEN>`, hears the AI
 disclosure and recording notice, then talks; the agent answers by voice with
-barge-in. Speech: Cartesia `ink-2` STT and `sonic-3.6` TTS (streaming
-WebSockets); LLM: Muse Spark via the OpenAI-compatible endpoint.
+barge-in. Speech: Cartesia `ink-2` STT and `sonic-3.6-2026-08-27` TTS
+(streaming WebSockets; the TTS model is a pinned dated snapshot so cached
+blocks and live audio match); LLM: Muse Spark via the OpenAI-compatible
+endpoint.
 
 - Adapter interfaces in `adapters/types.ts`; vendor code behind them only.
-- Pre-rendered blocks (disclosure, notice, hold, silence prompt, ack phrases)
+- Pre-rendered blocks (disclosure, notice, hold, silence prompt, openers)
   are cached as raw PCM under `backend/.cache/blocks/` (gitignored), keyed by
   sha256 of (text, language, voice, model, model revision, speed, tone, sample
   rate). Bump `TTS_MODEL_REVISION` whenever the TTS model changes.
@@ -79,12 +81,23 @@ WebSockets); LLM: Muse Spark via the OpenAI-compatible endpoint.
   first token — so turn 1 reuses a warm provider prefix and the same keep-alive
   connection (undici `Agent`, MIT licence). Logged as `llm.warmup` with
   outcome only, never text; failures never affect the session.
-- Instant acknowledgement (`ACK_ENABLED` default true, `ACK_DELAY_MS` default
-  400): when the LLM's first token is slower than the delay, the session plays
-  one rotating pre-rendered ack ("Okay.", "Right.", "Mm-hmm.", "Sure.") as its
-  own utterance, so the client queues the reply behind it. Acks are not model
-  content (never in history or turn text); barge-in stops them like reply
-  audio.
+- Openers (`OPENER_ENABLED`, default true): at STT final the caller's words
+  are classified with deterministic rules (question, problem, confirmation,
+  greeting, other) and a matching pre-rendered opener ("Let me check.",
+  "I'm sorry about that.", "Okay.", ...) plays as its own utterance while the
+  LLM runs, so the reply queues behind it; the LLM is told what was said and
+  continues without re-acknowledging. A heard opener joins the stored spoken
+  text and history; barge-in stops it like reply audio. Greetings and plain
+  statements get no opener.
+- Reply tone: the LLM begins every reply with a hidden `[tone: <name>]` tag
+  (system prompt v3), stripped before TTS/transcript/history/storage and
+  mapped to one Cartesia `generation_config.emotion` for the whole reply
+  context. The allow-list lives in `src/voice/tone.ts`; anything else falls
+  back to neutral. The chosen tone is logged on `turn.completed`.
+- Replies synthesise on one TTS context per turn (sentence continuations,
+  `max_buffer_delay_ms: 0` since we buffer per sentence client-side).
+- STT keyterms bias recognition toward the tenant org/agent names, `STT_KEYTERMS`
+  extras and built-in Nigerian terms (never caller data; vendor limits enforced).
 - **No audio is persisted anywhere in this milestone.** Transcripts, timings
   and notice proof go to Postgres through `DrizzleInteractionStore` (the
   `InMemoryInteractionStore` is test-only now); both stores redact sensitive
@@ -94,11 +107,12 @@ WebSockets); LLM: Muse Spark via the OpenAI-compatible endpoint.
 - Latency: `turn.metrics` carries per-turn `stt`, `llm_first_token`,
   `llm_total`, `tts_first_audio` and `end_to_first_audio` (ms, reply audio).
   The server log (`turn.completed`) and the stored turn record additionally
-  carry `ack_first_audio` (speech end to ack audio, null when no ack played);
-  the wire `TurnTimingsMs` is frozen, so it stays server-side.
+  carry `opener_first_audio` (speech end to opener audio, null when no opener
+  played); the wire `TurnTimingsMs` is frozen, so it stays server-side.
 
-Headless end-to-end check against a running backend:
+Headless end-to-end checks against a running backend:
 
 ```
-pnpm voice:smoke   # synthesises a caller line, runs one turn, prints timings
+pnpm voice:smoke                 # synthesises a caller line, runs one turn, prints timings
+pnpm voice:expressive-samples    # renders emotion/openers WAVs for listening (gitignored)
 ```

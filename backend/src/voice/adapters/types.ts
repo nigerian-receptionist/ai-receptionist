@@ -54,7 +54,12 @@ export interface SttStreamSession {
 
 export interface SpeechToText {
   readonly modelId: string;
-  startSession(opts: { sampleRate: number; language?: string }): Promise<SttStreamSession>;
+  startSession(opts: {
+    sampleRate: number;
+    language?: string;
+    /** STT keyterms (bias phrases); set once per connection, never caller data. */
+    keyterms?: string[];
+  }): Promise<SttStreamSession>;
 }
 
 export interface VoiceInfo {
@@ -90,22 +95,42 @@ export type TtsStreamEvent =
   | { kind: "done"; result: TtsResult };
 
 /**
- * One warm TTS connection for a voice session. Many `speak()` calls share it
- * (Cartesia multiplexes them by context id); each call is independently
- * cancellable via its AbortSignal.
+ * One agent reply synthesised on one Cartesia context (continuations): each
+ * sentence is pushed as it completes (`continue: true`, joining spaces so the
+ * concatenated transcript is valid) and the reply ends with `finish()` (empty
+ * transcript, `continue: false`). Audio streams back in push order with word
+ * timestamps, and a single `done` closes the context. All fields except
+ * transcript/continue stay identical within the context.
+ */
+export interface TtsReplyStream {
+  /**
+   * Push one sentence (verbatim; the caller owns joining spaces). A no-op
+   * after abort; throws after `finish()`.
+   */
+  push(text: string): void;
+  /** End the reply. Idempotent; throws when nothing was pushed. */
+  finish(): void;
+  /**
+   * Audio/timestamp events in push order. Rejects on abort or error; queued
+   * audio is dropped on abort so a cancelled reply never leaks stale chunks.
+   */
+  events(): AsyncIterable<TtsStreamEvent>;
+}
+
+/**
+ * One warm TTS connection for a voice session. Replies multiplex on it by
+ * context id; each reply is independently cancellable via its AbortSignal.
  */
 export interface TtsStreamSession {
-  speak(
-    text: string,
-    opts: {
-      voiceId: string;
-      language: string;
-      tone?: string;
-      speed?: number;
-      contextId: string;
-      signal?: AbortSignal;
-    },
-  ): AsyncIterable<TtsStreamEvent>;
+  speakReply(opts: {
+    voiceId: string;
+    language: string;
+    /** Session tone name (adapter maps it to a Cartesia emotion). */
+    tone?: string;
+    speed?: number;
+    contextId: string;
+    signal?: AbortSignal;
+  }): TtsReplyStream;
   close(): Promise<void>;
 }
 

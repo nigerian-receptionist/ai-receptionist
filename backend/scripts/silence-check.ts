@@ -359,12 +359,14 @@ async function main(): Promise<void> {
 
   function shortId(id: string): string {
     if (id.startsWith("notice-") || id === "hold" || id === "silence-prompt") return id;
-    if (id.startsWith("ack-")) return `ack-${id.slice(4, 12)}`;
+    if (id.startsWith("opener-")) return `opener-${id.slice(7, 15)}`;
     return `reply-${id.slice(0, 8)}`;
   }
 
   function isReplyUtterance(id: string): boolean {
-    return !id.startsWith("notice-") && !id.startsWith("ack-") && id !== "hold" && id !== "silence-prompt";
+    return (
+      !id.startsWith("notice-") && !id.startsWith("opener-") && id !== "hold" && id !== "silence-prompt"
+    );
   }
 
   const done = new Promise<void>((resolve) => {

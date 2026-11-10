@@ -16,7 +16,8 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:setup": "pnpm db:migrate && pnpm db:seed",
     "voice:smoke": "tsx --env-file=.env scripts/voice-smoke.ts",
-    "voice:silence-check": "tsx --env-file=.env scripts/silence-check.ts"
+    "voice:silence-check": "tsx --env-file=.env scripts/silence-check.ts",
+    "voice:expressive-samples": "tsx --env-file=.env scripts/expressive-samples.ts"
   },
   "dependencies": {
     "@nestjs/common": "12.4.2",

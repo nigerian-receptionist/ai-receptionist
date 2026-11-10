@@ -108,7 +108,7 @@ describe("BlockRenderer", () => {
     expect(tts.calls).toBe(2);
   });
 
-  it("keys the cache by model revision and output sample rate (M18)", () => {
+  it("keys the cache by exact model id, revision and output sample rate (M18)", () => {
     const base = {
       text: "hello",
       language: "en",
@@ -121,6 +121,10 @@ describe("BlockRenderer", () => {
     };
     expect(blockCacheKey({ ...base, modelRevision: "r2" })).not.toBe(blockCacheKey(base));
     expect(blockCacheKey({ ...base, outputSampleRate: 16000 })).not.toBe(blockCacheKey(base));
+    // A dated snapshot pin re-renders blocks instead of reusing stale audio.
+    expect(blockCacheKey({ ...base, modelId: "tts_cartesia@sonic-3.6-2026-08-27" })).not.toBe(
+      blockCacheKey({ ...base, modelId: "tts_cartesia@sonic-3.6" }),
+    );
     expect(blockCacheKey(base)).toBe(blockCacheKey({ ...base }));
   });
 

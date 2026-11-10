@@ -13,18 +13,20 @@ import type {
   SttResult,
   SttStreamSession,
   TextToSpeech,
+  TtsReplyStream,
   TtsStreamEvent,
   TtsStreamSession,
   WordTiming,
 } from "./adapters/types";
-import { ACK_BLOCKS, BlockRenderer, type BlockDefinition } from "./blocks/block-cache";
+import { BlockRenderer, OPENER_BLOCKS, type BlockDefinition } from "./blocks/block-cache";
 import type { ClientMessage } from "./client-messages";
 import type { ServerMessage } from "./protocol";
 import { InMemoryInteractionStore } from "./testing/in-memory-interaction-store";
 import {
+  attributeReplyAudio,
   LLM_WARMUP_USER_MESSAGE,
   VoiceSession,
-  truncateSpoken,
+  truncateReply,
   type VoiceSessionConfig,
 } from "./voice-session";
 
@@ -91,12 +93,19 @@ class FakeSttSession implements SttStreamSession {
 class FakeStt implements SpeechToText {
   readonly modelId = "stt_fake@test";
   sessions: FakeSttSession[] = [];
+  /** startSession opts per call, in order (keyterm assertions). */
+  readonly startOpts: Array<{ sampleRate?: number; language?: string; keyterms?: string[] }> = [];
   /** When set, startSession parks until the gate opens (M30 tests). */
   startGate: Promise<void> | null = null;
   startEntered = false;
   constructor(private readonly finals: string[]) {}
-  async startSession(): Promise<SttStreamSession> {
+  async startSession(opts?: {
+    sampleRate?: number;
+    language?: string;
+    keyterms?: string[];
+  }): Promise<SttStreamSession> {
     this.startEntered = true;
+    this.startOpts.push({ ...opts });
     if (this.startGate) await this.startGate;
     const session = new FakeSttSession(this.finals);
     this.sessions.push(session);
@@ -109,64 +118,157 @@ interface FakeUtterance {
   words: WordTiming[];
 }
 
-class FakeTtsSession implements TtsStreamSession {
-  /** Context ids that saw an abort, vs ran to `done` (abort-handover tests). */
-  readonly abortedContexts: string[] = [];
-  readonly completedContexts: string[] = [];
-  /**
-   * text -> canned audio; default one chunk per sentence. When `gate` is set,
-   * speak parks after the first audio chunk until the gate opens, so tests can
-   * interrupt deterministically mid-utterance. `gateFor` gates per text.
-   */
-  private readonly activeContexts = new Set<string>();
+class FakeReplyStream implements TtsReplyStream {
+  /** Raw pushed transcripts, in order (joining spaces intact). */
+  readonly pushes: string[] = [];
+  finished = false;
+  private readonly queue: Array<{ event: TtsStreamEvent; text: string | null }> = [];
+  private waiter: (() => void) | null = null;
+  private readonly abortPromise: Promise<void>;
+  private signalAbort: () => void = () => undefined;
+  private eventsCalled = false;
+
   constructor(
-    private readonly canned: Map<string, FakeUtterance> = new Map(),
-    private gate: Promise<void> | null = null,
-    private readonly spokenLog: string[] | null = null,
-    private readonly gateFor: ((text: string) => Promise<void> | null) | null = null,
-    private readonly speakDelayMs = 0,
-  ) {}
-  async *speak(
-    text: string,
-    opts: { contextId: string; signal?: AbortSignal },
-  ): AsyncIterable<TtsStreamEvent> {
-    this.spokenLog?.push(text);
-    if (this.activeContexts.has(opts.contextId)) throw new Error("duplicate tts context id");
-    this.activeContexts.add(opts.contextId);
-    if (this.speakDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.speakDelayMs));
-    try {
-      const found = this.canned.get(text);
-      const pcm = found?.pcm ?? makePcm(0.3);
-      const words = found?.words ?? [];
-      yield { kind: "audio", chunk: { pcmS16le: pcm, sampleRate: 24000, isFirst: true, isLast: true } };
-      if (opts.signal?.aborted) throw aborted();
-      await tick();
-      if (words.length > 0) yield { kind: "timestamps", words };
-      if (opts.signal?.aborted) throw aborted();
-      const gate = this.gateFor?.(text) ?? this.gate;
-      if (gate) await gate;
-      if (opts.signal?.aborted) throw aborted();
-      yield {
+    private readonly session: FakeTtsSession,
+    private readonly opts: { contextId: string; tone?: string; signal?: AbortSignal },
+  ) {
+    this.abortPromise = new Promise<void>((resolve) => {
+      this.signalAbort = resolve;
+    });
+    opts.signal?.addEventListener(
+      "abort",
+      () => {
+        this.session.abortedContexts.push(opts.contextId);
+        this.signalAbort();
+        this.waiter?.();
+      },
+      { once: true },
+    );
+  }
+
+  push(text: string): void {
+    if (this.finished) throw new Error("tts push after finish");
+    if (this.opts.signal?.aborted) return;
+    this.pushes.push(text);
+    // The session-level log keeps trimmed sentences (pushes 2+ carry a
+    // joining space); raw text stays on `pushes` for join assertions.
+    this.session.spokenLog?.push(text.trim());
+    const found = this.session.canned.get(text.trim());
+    const pcm = found?.pcm ?? makePcm(0.3);
+    const words = found?.words ?? [];
+    this.queue.push({
+      event: {
+        kind: "audio",
+        chunk: { pcmS16le: pcm, sampleRate: 24000, isFirst: this.pushes.length === 1, isLast: false },
+      },
+      text,
+    });
+    if (words.length > 0) this.queue.push({ event: { kind: "timestamps", words }, text });
+    this.waiter?.();
+  }
+
+  finish(): void {
+    if (this.finished) return;
+    if (this.pushes.length === 0) throw new Error("tts reply finished without input");
+    this.finished = true;
+    this.queue.push({
+      event: {
         kind: "done",
         result: {
           pcmS16le: Buffer.alloc(0),
           sampleRate: 24000,
-          durationS: pcm.length / 2 / 24000,
+          durationS: 0,
           timeToFirstAudioS: 0.01,
           totalLatencyS: 0.02,
           voiceId: "fake",
           modelId: "tts_fake@test",
-          textSpoken: text,
-          words,
+          textSpoken: "",
+          words: [],
         },
-      };
-    } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") this.abortedContexts.push(opts.contextId);
-      throw error;
-    } finally {
-      this.activeContexts.delete(opts.contextId);
+      },
+      text: null,
+    });
+    this.waiter?.();
+  }
+
+  async *events(): AsyncIterable<TtsStreamEvent> {
+    if (this.eventsCalled) throw new Error("tts reply events consumed twice");
+    this.eventsCalled = true;
+    if (this.session.speakDelayMs > 0) {
+      await Promise.race([
+        new Promise((resolve) => setTimeout(resolve, this.session.speakDelayMs)),
+        this.abortPromise,
+      ]);
     }
-    this.completedContexts.push(opts.contextId);
+    try {
+      for (;;) {
+        if (this.opts.signal?.aborted) throw aborted();
+        while (this.queue.length > 0) {
+          const item = this.queue.shift();
+          if (!item) break;
+          yield item.event;
+          // Gates park after a push's audio and timestamps (never before the
+          // first chunk), so tests can interrupt deterministically
+          // mid-utterance with words already delivered. Abort-aware: a barge
+          // while parked settles via the abort race, never a hang.
+          const next = this.queue[0];
+          const timestampsFollow =
+            item.event.kind === "audio" &&
+            next !== undefined &&
+            next.text === item.text &&
+            next.event.kind === "timestamps";
+          if (
+            (item.event.kind === "timestamps" ||
+              (item.event.kind === "audio" && !timestampsFollow)) &&
+            item.text !== null
+          ) {
+            const gate = this.session.gateFor?.(item.text) ?? this.session.gate;
+            if (gate) await Promise.race([gate, this.abortPromise]);
+            if (this.opts.signal?.aborted) throw aborted();
+          }
+          if (item.event.kind === "audio") await tick();
+        }
+        if (this.finished) {
+          this.session.completedContexts.push(this.opts.contextId);
+          return;
+        }
+        await new Promise<void>((resolve) => {
+          this.waiter = resolve;
+        });
+        this.waiter = null;
+      }
+    } finally {
+      this.session.releaseContext(this.opts.contextId);
+    }
+  }
+}
+
+class FakeTtsSession implements TtsStreamSession {
+  /** Context ids that saw an abort, vs ran to `done` (abort-handover tests). */
+  readonly abortedContexts: string[] = [];
+  readonly completedContexts: string[] = [];
+  /** One reply stream per speakReply call, in order (single-context assertions). */
+  readonly replies: FakeReplyStream[] = [];
+  /** speakReply opts per call: context id and reply tone. */
+  readonly replyOpts: Array<{ contextId: string; tone?: string }> = [];
+  private readonly activeContexts = new Set<string>();
+  constructor(
+    readonly canned: Map<string, FakeUtterance> = new Map(),
+    readonly gate: Promise<void> | null = null,
+    readonly spokenLog: string[] | null = null,
+    readonly gateFor: ((text: string) => Promise<void> | null) | null = null,
+    readonly speakDelayMs = 0,
+  ) {}
+  speakReply(opts: { contextId: string; tone?: string; signal?: AbortSignal }): TtsReplyStream {
+    if (this.activeContexts.has(opts.contextId)) throw new Error("duplicate tts context id");
+    this.activeContexts.add(opts.contextId);
+    this.replyOpts.push({ contextId: opts.contextId, tone: opts.tone });
+    const stream = new FakeReplyStream(this, opts);
+    this.replies.push(stream);
+    return stream;
+  }
+  releaseContext(contextId: string): void {
+    this.activeContexts.delete(contextId);
   }
   async close(): Promise<void> {}
 }
@@ -344,8 +446,8 @@ function makeHarness(opts: {
       maxBytesPerSec: 64000,
       maxTranscriptChars: 2000,
       llmWarmupEnabled: true,
-      ackEnabled: true,
-      ackDelayMs: 400,
+      openerEnabled: true,
+      sttKeytermsExtra: [],
       ...opts.config,
     },
     send: (message) => sent.push(message),
@@ -706,7 +808,7 @@ describe("VoiceSession", () => {
     await completeNotice(h);
     await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
     const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
-    expect(turns.find((t) => t.speaker === "agent")).toMatchObject({ promptVersion: 2 });
+    expect(turns.find((t) => t.speaker === "agent")).toMatchObject({ promptVersion: 3 });
     expect(turns.find((t) => t.speaker === "caller")?.promptVersion).toBeUndefined();
   });
 
@@ -814,7 +916,7 @@ describe("VoiceSession", () => {
     await h.session.handleMessage({ type: "playback.interrupted", utteranceId: turn2Id, playedMs: 10 });
     openGate2();
     await turn2;
-    expect(h.tts.ttsSession.abortedContexts).toContain(`${turn2Id}:s0`);
+    expect(h.tts.ttsSession.abortedContexts).toContain(turn2Id);
     const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
     expect(turns.filter((t) => t.speaker === "agent")).toHaveLength(2);
     expect(turns.filter((t) => t.speaker === "agent").every((t) => t.interrupted)).toBe(true);
@@ -900,15 +1002,62 @@ describe("VoiceSession", () => {
     });
     await completeNotice(h);
     const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
-    // The LLM run completes while TTS for sentence 1 is still parked...
-    await vi.waitFor(() => expect(h.llm.finishedReplies).toHaveLength(1));
-    // ...and sentence 2 has not started speaking yet (ordered queue).
-    expect(h.tts.spoken).toEqual(["First sentence here."]);
+    // The LLM run completes while reply audio is still parked on the gate...
+    await vi.waitFor(() => {
+      expect(h.llm.finishedReplies).toHaveLength(1);
+      expect(h.tts.ttsSession.replies[0]?.pushes).toHaveLength(2);
+    });
+    // ...pushes kept sentence order on the single reply context (the metrics
+    // wait on audio, never the other way round).
+    expect(h.tts.ttsSession.replies).toHaveLength(1);
+    expect(h.tts.ttsSession.replies[0]?.pushes).toEqual([
+      "First sentence here.",
+      " Second sentence here.",
+    ]);
+    expect(h.sent.some((m) => m.type === "turn.metrics")).toBe(false);
     openGate();
     await turn;
-    // ...and audio still comes out in sentence order.
+    expect(h.tts.ttsSession.replies[0]?.finished).toBe(true);
     expect(h.tts.spoken).toEqual(["First sentence here.", "Second sentence here."]);
     expect(h.session.currentState).toBe("listening");
+  });
+
+  it("synthesises each reply on one TTS context with a valid joined transcript", async () => {
+    const h = makeHarness({
+      sttFinals: ["Hi."],
+      llmReplies: ["First sentence here. Second one follows. Third ends it."],
+    });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    const turnId = currentTurnId(h);
+    // Exactly one context per reply, keyed by the turn id.
+    expect(h.tts.ttsSession.replies).toHaveLength(1);
+    expect(h.tts.ttsSession.replyOpts).toEqual([{ contextId: turnId, tone: "neutral" }]);
+    const reply = h.tts.ttsSession.replies[0];
+    expect(reply?.finished).toBe(true);
+    // Joining spaces: the concatenated pushes form a valid transcript.
+    expect(reply?.pushes).toEqual([
+      "First sentence here.",
+      " Second one follows.",
+      " Third ends it.",
+    ]);
+    expect(reply?.pushes.join("")).toBe("First sentence here. Second one follows. Third ends it.");
+    expect(h.tts.ttsSession.completedContexts).toEqual([turnId]);
+  });
+
+  it("passes the caller STT keyterms once per connection (never caller data)", async () => {
+    const h = makeHarness({
+      sttFinals: ["What is my balance?"],
+      llmReplies: ["Your balance is ten naira."],
+      config: { sttKeytermsExtra: ["loan officer"] },
+    });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    expect(h.stt.startOpts).toHaveLength(1);
+    const keyterms = h.stt.startOpts[0]?.keyterms ?? [];
+    expect(keyterms.slice(0, 3)).toEqual(["Test Org", "Test Agent", "loan officer"]);
+    expect(keyterms).toContain("naira");
+    expect(keyterms.join(" ")).not.toContain("What is my balance?");
   });
 
   it("M28: TTS starts on the first sentence while the LLM is stalled", async () => {
@@ -939,6 +1088,104 @@ describe("VoiceSession", () => {
     await turn;
     expect(h.tts.spoken).toEqual(["Hello there.", "Second part here."]);
     expect(h.session.currentState).toBe("listening");
+  });
+
+  describe("reply tone tags", () => {
+    function speechText(h: Harness): string {
+      return h.sent
+        .filter((m) => m.type === "agent.text" && (m as { kind: string }).kind === "speech")
+        .map((m) => (m as { delta: string }).delta)
+        .join("");
+    }
+
+    it("strips the tag before TTS, transcript, history and storage", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["[tone: empathetic] I understand. Let me check your balance."],
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      // Split across word deltas by the fake LLM, parsed once, never emitted.
+      expect(h.tts.ttsSession.replies).toHaveLength(1);
+      expect(h.tts.ttsSession.replies[0]?.pushes).toEqual([
+        "I understand.",
+        " Let me check your balance.",
+      ]);
+      expect(speechText(h)).not.toContain("[tone");
+      expect(speechText(h)).toContain("I understand.");
+      const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+      const agentTurn = turns.find((t) => t.speaker === "agent");
+      expect(agentTurn?.text).not.toContain("[tone");
+      expect(agentTurn?.spokenText).toBe("I understand. Let me check your balance.");
+      // The tone reaches the reply context and the turn log.
+      expect(h.tts.ttsSession.replyOpts).toEqual([
+        { contextId: currentTurnId(h), tone: "empathetic" },
+      ]);
+      expect(h.logs.find((l) => l["msg"] === "turn.completed")).toMatchObject({ tone: "empathetic" });
+      expect(h.logs.some((l) => l["msg"] === "tone.tag_invalid")).toBe(false);
+    });
+
+    it("a missing tag defaults to neutral without logging", async () => {
+      const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello there."] });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(h.tts.ttsSession.replyOpts).toEqual([{ contextId: currentTurnId(h), tone: "neutral" }]);
+      expect(h.logs.find((l) => l["msg"] === "turn.completed")).toMatchObject({ tone: "neutral" });
+      expect(h.logs.some((l) => l["msg"] === "tone.tag_invalid")).toBe(false);
+    });
+
+    it("a disallowed tone maps to neutral and logs (never spoken)", async () => {
+      const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["[tone: sarcastic] Oh really?"] });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(h.tts.ttsSession.replies[0]?.pushes).toEqual(["Oh really?"]);
+      expect(speechText(h)).not.toContain("[tone");
+      expect(h.tts.ttsSession.replyOpts).toEqual([{ contextId: currentTurnId(h), tone: "neutral" }]);
+      expect(h.logs.find((l) => l["msg"] === "tone.tag_invalid")).toMatchObject({
+        reason: "unknown",
+      });
+      // The raw tag value is unconstrained LLM output: never logged.
+      expect(JSON.stringify(h.logs)).not.toContain("sarcastic");
+    });
+
+    it("a malformed tag maps to neutral and logs", async () => {
+      const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["[tone] Hello there."] });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(h.tts.ttsSession.replies[0]?.pushes).toEqual(["Hello there."]);
+      expect(h.logs.find((l) => l["msg"] === "tone.tag_invalid")).toMatchObject({
+        reason: "malformed",
+      });
+      expect(h.logs.find((l) => l["msg"] === "turn.completed")).toMatchObject({ tone: "neutral" });
+    });
+
+    it("strips a later tag and keeps the head tone", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["[tone: warm] Hello. [tone: happy] How are you?"],
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(h.tts.ttsSession.replies[0]?.pushes).toEqual(["Hello.", " How are you?"]);
+      expect(speechText(h)).not.toContain("[tone");
+      expect(h.logs.find((l) => l["msg"] === "turn.completed")).toMatchObject({ tone: "warm" });
+    });
+
+    it("records the tone on barge-in too", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["[tone: apologetic] Sorry about the wait. One moment please."],
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      const turnId = currentTurnId(h);
+      await h.session.handleMessage({ type: "playback.progress", utteranceId: turnId, playedMs: 100 });
+      await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+      expect(h.logs.find((l) => l["msg"] === "turn.barged_in")).toMatchObject({
+        tone: "apologetic",
+        tail: true,
+      });
+    });
   });
 
   it("M29: the caller-turn write runs off the first-audio path", async () => {
@@ -1232,9 +1479,9 @@ describe("VoiceSession", () => {
     });
   });
 
-  describe("instant acknowledgement", () => {
-    const ACK_IDS = ACK_BLOCKS.map((b) => b.id);
-    const ACK_TEXTS = ACK_BLOCKS.map((b) => b.template);
+  describe("openers", () => {
+    const OPENER_IDS = OPENER_BLOCKS.map((b) => b.id);
+    const OPENER_TEXTS = OPENER_BLOCKS.map((b) => b.template);
 
     function deferredGate(): { gate: Promise<void>; open: () => void } {
       let open!: () => void;
@@ -1244,82 +1491,116 @@ describe("VoiceSession", () => {
       return { gate, open };
     }
 
-    it("plays one ack when the first token is slower than ACK_DELAY_MS", async () => {
+    it("plays a matching opener immediately, before the LLM reply", async () => {
       const h = makeHarness({
-        sttFinals: ["Hi."],
-        llmReplies: ["Hello there."],
-        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+        sttFinals: ["What is my balance?"],
+        llmReplies: ["Your balance is ten naira."],
+        config: { llmWarmupEnabled: false },
       });
-      const slow = deferredGate();
-      h.llm.firstTokenGates.push(slow.gate);
       await completeNotice(h);
-      const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
-      await vi.waitFor(() => expect(ackBlockIds(h)).toHaveLength(1));
-      slow.open();
-      await turn;
+      // No LLM slowness needed: a chosen opener always plays.
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
 
-      expect(ackBlockIds(h)).toHaveLength(1);
-      expect(ACK_IDS).toContain(ackBlockIds(h)[0]);
-      const ackUtterance = ackUtterances(h)[0] as string;
-      // The utterance id marks acks for clients and scripts (silence-check).
-      expect(ackUtterance.startsWith("ack-")).toBe(true);
-      // Ack text passes the speech normaliser untouched.
-      const ackText = h.sent.find(
-        (m) => m.type === "agent.text" && (m as { utteranceId: string }).utteranceId === ackUtterance,
+      expect(openerBlockIds(h)).toEqual(["opener_question_1"]);
+      expect(OPENER_IDS).toContain(openerBlockIds(h)[0]);
+      const openerUtterance = openerUtterances(h)[0] as string;
+      // The utterance id marks openers for clients and scripts (silence-check).
+      expect(openerUtterance.startsWith("opener-")).toBe(true);
+      // Opener text passes the speech normaliser untouched.
+      const openerText = h.sent.find(
+        (m) => m.type === "agent.text" && (m as { utteranceId: string }).utteranceId === openerUtterance,
       );
-      expect(ACK_TEXTS).toContain((ackText as { delta: string }).delta);
+      expect(OPENER_TEXTS).toContain((openerText as { delta: string }).delta);
 
-      // The reply queues after the ack: no interleave, nothing dropped.
+      // The reply queues after the opener: no interleave, nothing dropped.
       const turnId = currentTurnId(h);
       const order = turnAudioOrder(h);
       expect(order.length).toBeGreaterThan(1);
-      const lastAck = order.lastIndexOf(ackUtterance);
+      const lastOpener = order.lastIndexOf(openerUtterance);
       const firstReply = order.indexOf(turnId);
-      expect(lastAck).toBeGreaterThanOrEqual(0);
-      expect(firstReply).toBeGreaterThan(lastAck);
-      expect(h.sent).toContainEqual({ type: "agent.audio.end", utteranceId: ackUtterance });
+      expect(lastOpener).toBeGreaterThanOrEqual(0);
+      expect(firstReply).toBeGreaterThan(lastOpener);
+      expect(h.sent).toContainEqual({ type: "agent.audio.end", utteranceId: openerUtterance });
       expect(h.sent).toContainEqual({ type: "agent.audio.end", utteranceId: turnId });
 
-      // Caller-experienced ack timing is logged server-side; the wire metrics
-      // stay reply-only (frozen TurnTimingsMs).
+      // Caller-experienced opener timing is logged server-side; the wire
+      // metrics stay reply-only (frozen TurnTimingsMs).
       const completed = h.logs.find((l) => l["msg"] === "turn.completed");
-      expect(completed).toMatchObject({ ack_first_audio_ms: expect.any(Number) });
+      expect(completed).toMatchObject({ opener_first_audio_ms: expect.any(Number) });
       const metrics = h.sent.find((m) => m.type === "turn.metrics");
       expect(metrics?.type).toBe("turn.metrics");
       if (metrics?.type !== "turn.metrics") throw new Error("no metrics");
-      expect("ack_first_audio" in metrics.timingsMs).toBe(false);
+      expect("opener_first_audio" in metrics.timingsMs).toBe(false);
       expect(typeof metrics.timingsMs.end_to_first_audio).toBe("number");
       const agentTurn = (h.store.interactions.get(h.interactionId())?.turns ?? []).find(
         (t) => t.speaker === "agent",
       );
-      expect(typeof agentTurn?.timingsMs["ack_first_audio"]).toBe("number");
-      expect(agentTurn?.text).toBe("Hello there.");
+      expect(typeof agentTurn?.timingsMs["opener_first_audio"]).toBe("number");
+      expect(agentTurn?.text).toBe("Your balance is ten naira.");
     });
 
-    it("skips the ack when the first token beats ACK_DELAY_MS", async () => {
+    it("tells the LLM what was said so it continues without re-acknowledging", async () => {
       const h = makeHarness({
-        sttFinals: ["Hi."],
-        llmReplies: ["Hello there."],
-        config: { llmWarmupEnabled: false, ackDelayMs: 100 },
+        sttFinals: ["What is my balance?"],
+        llmReplies: ["Your balance is ten naira."],
+        config: { llmWarmupEnabled: false },
       });
       await completeNotice(h);
       await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
-      expect(ackBlockIds(h)).toHaveLength(0);
-      expect(turnAudioOrder(h).some((id) => id.startsWith("ack-"))).toBe(false);
+      const messages = turnCalls(h)[0] ?? [];
+      expect(messages.slice(-2)).toEqual([
+        { role: "assistant", content: "Let me check." },
+        { role: "system", content: expect.stringContaining("Let me check.") },
+      ]);
+      expect(messages.at(-1)?.content).toMatch(/do not open with another acknowledgement/i);
+    });
+
+    it("the opener joins the stored spoken text and history", async () => {
+      const h = makeHarness({
+        sttFinals: ["What is my balance?", "Thanks."],
+        llmReplies: ["Your balance is ten naira.", "You are welcome."],
+        config: { llmWarmupEnabled: false },
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      const agentTurn = (h.store.interactions.get(h.interactionId())?.turns ?? []).find(
+        (t) => t.speaker === "agent",
+      );
+      expect(agentTurn?.spokenText).toBe("Let me check. Your balance is ten naira.");
+      // The next turn sees the combined assistant message (greeting: no opener).
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+      const turn2Messages = turnCalls(h)[1] ?? [];
+      expect(turn2Messages.filter((m) => m.role === "assistant")).toEqual([
+        { role: "assistant", content: "Let me check. Your balance is ten naira." },
+      ]);
+    });
+
+    it("plays nothing for greetings and small-talk", async () => {
+      const h = makeHarness({
+        sttFinals: ["Hi."],
+        llmReplies: ["Hello there."],
+        config: { llmWarmupEnabled: false },
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(openerBlockIds(h)).toHaveLength(0);
+      expect(turnAudioOrder(h).some((id) => id.startsWith("opener-"))).toBe(false);
       expect(h.logs.find((l) => l["msg"] === "turn.completed")).toMatchObject({
-        ack_first_audio_ms: null,
+        opener_first_audio_ms: null,
       });
       const agentTurn = (h.store.interactions.get(h.interactionId())?.turns ?? []).find(
         (t) => t.speaker === "agent",
       );
-      expect(agentTurn?.timingsMs["ack_first_audio"]).toBeUndefined();
+      expect(agentTurn?.timingsMs["opener_first_audio"]).toBeUndefined();
+      // No opener note in the LLM messages either.
+      expect(turnCalls(h)[0]).toHaveLength(2);
     });
 
-    it("never acks when disabled, however slow the LLM is", async () => {
+    it("never openers when disabled", async () => {
       const h = makeHarness({
-        sttFinals: ["Hi."],
-        llmReplies: ["Hello there."],
-        config: { llmWarmupEnabled: false, ackEnabled: false, ackDelayMs: 30 },
+        sttFinals: ["What is my balance?"],
+        llmReplies: ["Your balance is ten naira."],
+        config: { llmWarmupEnabled: false, openerEnabled: false },
       });
       const slow = deferredGate();
       h.llm.firstTokenGates.push(slow.gate);
@@ -1327,73 +1608,93 @@ describe("VoiceSession", () => {
       const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
       setTimeout(slow.open, 100);
       await turn;
-      expect(ackBlockIds(h)).toHaveLength(0);
+      expect(openerBlockIds(h)).toHaveLength(0);
       expect(h.sent.some((m) => m.type === "turn.metrics")).toBe(true);
     });
 
-    it("rotates acks without repeating the last one", async () => {
+    it("rotates within a category without repeating the last one", async () => {
       const h = makeHarness({
-        sttFinals: ["One.", "Two."],
-        llmReplies: ["First answer here.", "Second answer here."],
-        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+        sttFinals: ["What is my balance?", "When will it arrive?"],
+        llmReplies: ["Your balance is ten naira.", "Tomorrow morning."],
+        config: { llmWarmupEnabled: false },
       });
-      const first = deferredGate();
-      const second = deferredGate();
-      h.llm.firstTokenGates.push(first.gate, second.gate);
       await completeNotice(h);
-      const turn1 = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
-      await vi.waitFor(() => expect(ackBlockIds(h)).toHaveLength(1));
-      first.open();
-      await turn1;
-      const turn2 = h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
-      await vi.waitFor(() => expect(ackBlockIds(h)).toHaveLength(2));
-      second.open();
-      await turn2;
-      const [one, two] = ackBlockIds(h);
-      expect(one).not.toBe(two);
-    });
-
-    it("acks stay out of history and storage", async () => {
-      const h = makeHarness({
-        sttFinals: ["One.", "Two."],
-        llmReplies: ["First answer here.", "Second answer here."],
-        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
-      });
-      const slow = deferredGate();
-      h.llm.firstTokenGates.push(slow.gate);
-      await completeNotice(h);
-      const turn1 = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
-      await vi.waitFor(() => expect(ackBlockIds(h)).toHaveLength(1));
-      slow.open();
-      await turn1;
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
       await h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
-      // Turn 2 sees the reply only, never the ack.
-      const turn2Messages = turnCalls(h)[1] ?? [];
-      expect(turn2Messages.filter((m) => m.role === "assistant")).toEqual([
-        { role: "assistant", content: "First answer here." },
-      ]);
-      const blob =
-        JSON.stringify(h.llm.seenMessages) +
-        JSON.stringify(h.store.interactions.get(h.interactionId())?.turns);
-      for (const text of ACK_TEXTS) expect(blob).not.toContain(text);
+      expect(openerBlockIds(h)).toEqual(["opener_question_1", "opener_question_2"]);
     });
 
-    it("barge-in during an ack stops the ack and cancels the pending reply", async () => {
+    it("a problem gets a sympathetic opener, never a cheerful one", async () => {
       const h = makeHarness({
-        sttFinals: ["Hi.", "Thanks."],
-        llmReplies: ["Hello there.", "You are welcome."],
-        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+        sttFinals: ["My card was stolen."],
+        llmReplies: ["I will block it right away."],
+        config: { llmWarmupEnabled: false },
+      });
+      const pairs: Array<[string, string | undefined]> = [];
+      const origRender = h.blocks.render.bind(h.blocks);
+      vi.spyOn(h.blocks, "render").mockImplementation(async (block, opts) => {
+        if (block.id.startsWith("opener_")) pairs.push([block.id, opts.tone]);
+        return origRender(block, opts);
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(openerBlockIds(h)).toEqual(["opener_problem_1"]);
+      // Pre-render and turn render alike: problem openers are sympathetic.
+      expect(pairs.some(([id]) => id === "opener_problem_1")).toBe(true);
+      for (const [id, tone] of pairs) {
+        if (id.startsWith("opener_problem_")) expect(tone).toBe("empathetic");
+      }
+    });
+
+    it("escalation phrases get the sympathetic opener too", async () => {
+      const h = makeHarness({
+        sttFinals: ["I will sue you and call my lawyer."],
+        llmReplies: ["Let me connect you to a human."],
+        config: { llmWarmupEnabled: false },
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(openerBlockIds(h)).toEqual(["opener_problem_1"]);
+    });
+
+    it("a confirmation gets a warm opener", async () => {
+      const h = makeHarness({
+        sttFinals: ["Yes, that's right."],
+        llmReplies: ["Noted, thank you."],
+        config: { llmWarmupEnabled: false },
+      });
+      const pairs: Array<[string, string | undefined]> = [];
+      const origRender = h.blocks.render.bind(h.blocks);
+      vi.spyOn(h.blocks, "render").mockImplementation(async (block, opts) => {
+        if (block.id.startsWith("opener_")) pairs.push([block.id, opts.tone]);
+        return origRender(block, opts);
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(openerBlockIds(h)).toEqual(["opener_confirmation_1"]);
+      expect(pairs.some(([id]) => id === "opener_confirmation_1")).toBe(true);
+      for (const [id, tone] of pairs) {
+        if (id.startsWith("opener_confirmation_")) expect(tone).toBe("warm");
+      }
+    });
+
+    it("barge-in during the opener stops the opener and cancels the pending reply", async () => {
+      const h = makeHarness({
+        sttFinals: ["What is my balance?", "Thanks."],
+        llmReplies: ["Your balance is ten naira.", "You are welcome."],
+        config: { llmWarmupEnabled: false },
       });
       const slow = deferredGate();
       h.llm.firstTokenGates.push(slow.gate);
       await completeNotice(h);
       const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
-      await vi.waitFor(() => expect(ackUtterances(h)).toHaveLength(1));
-      const ackUtterance = ackUtterances(h)[0] as string;
+      // The opener plays while the LLM is still parked.
+      await vi.waitFor(() => expect(openerUtterances(h)).toHaveLength(1));
+      const openerUtterance = openerUtterances(h)[0] as string;
       await vi.waitFor(() =>
         expect(
           h.sent.some(
-            (m) => m.type === "agent.audio" && (m as { utteranceId: string }).utteranceId === ackUtterance,
+            (m) => m.type === "agent.audio" && (m as { utteranceId: string }).utteranceId === openerUtterance,
           ),
         ).toBe(true),
       );
@@ -1403,49 +1704,135 @@ describe("VoiceSession", () => {
       await turn;
 
       expect(h.session.currentState).toBe("listening");
-      expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: ackUtterance });
+      expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: openerUtterance });
       expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: turnId });
-      // The reply never flowed: no reply audio, and no agent turn to store
-      // (the model said nothing yet), so no store error either.
+      // The reply never flowed and the opener was never heard: no agent turn
+      // to store (the model said nothing yet), so no store error either.
       expect(turnAudioOrder(h).filter((id) => id === turnId)).toHaveLength(0);
       expect(
         (h.store.interactions.get(h.interactionId())?.turns ?? []).filter((t) => t.speaker === "agent"),
       ).toHaveLength(0);
       expect(h.logs.some((l) => l["msg"] === "store.append_turn_failed")).toBe(false);
-      // The next turn is clean: history holds no ack.
+      // The next turn is clean: history holds no unheard opener.
       await h.session.handleMessage({ type: "input.speech_ended", atMs: 20 });
       const turn2Messages = turnCalls(h)[1] ?? [];
-      expect(turn2Messages.some((m) => ACK_TEXTS.includes(m.content))).toBe(false);
+      expect(turn2Messages.some((m) => OPENER_TEXTS.includes(m.content))).toBe(false);
     });
 
-    it("a tail barge after an acked turn stops the reply and the still-playing ack", async () => {
-      const h = makeHarness({
-        sttFinals: ["Hi."],
-        llmReplies: ["Hello there."],
-        config: { llmWarmupEnabled: false, ackDelayMs: 30 },
+    it("barge-in after the opener was heard keeps the opener in the truncated turn", async () => {
+      let openGate!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        openGate = resolve;
       });
-      const slow = deferredGate();
-      h.llm.firstTokenGates.push(slow.gate);
+      const h = makeHarness({
+        sttFinals: ["What is my balance?"],
+        llmReplies: ["Your balance is ten naira. Anything else today?"],
+        ttsGate: gate,
+        config: { llmWarmupEnabled: false },
+      });
       await completeNotice(h);
       const turn = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
-      await vi.waitFor(() => expect(ackUtterances(h)).toHaveLength(1));
-      const ackUtterance = ackUtterances(h)[0] as string;
-      slow.open();
-      await turn;
+      await vi.waitFor(() => expect(openerUtterances(h)).toHaveLength(1));
+      const openerUtterance = openerUtterances(h)[0] as string;
       const turnId = currentTurnId(h);
-      // Reply fully sent but unacked; the ack is unacked too: barge the tail.
+      await vi.waitFor(() => {
+        expect(
+          h.sent.some((m) => m.type === "agent.audio" && (m as { utteranceId: string }).utteranceId === turnId),
+        ).toBe(true);
+      });
+      // The caller heard the whole opener, then barged 50 ms into the reply.
+      await h.session.handleMessage({ type: "playback.done", utteranceId: openerUtterance });
       await h.session.handleMessage({ type: "playback.progress", utteranceId: turnId, playedMs: 50 });
       await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+      openGate();
+      await turn;
+
+      const agentTurn = (h.store.interactions.get(h.interactionId())?.turns ?? []).find(
+        (t) => t.speaker === "agent",
+      );
+      expect(agentTurn).toMatchObject({ interrupted: true, spokenText: "Let me check." });
+      // History matches storage: the heard opener plus nothing of the reply.
+      h.stt.sessions[0]?.finals.push("Thanks.");
+      h.llm.replies.push("You are welcome.");
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 20 });
+      const lastMessages = h.llm.seenMessages[h.llm.seenMessages.length - 1] ?? [];
+      expect(lastMessages.filter((m) => m.role === "assistant")).toEqual([
+        { role: "assistant", content: "Let me check." },
+      ]);
+    });
+
+    it("a tail barge after an opener turn keeps the heard opener and truncates the reply", async () => {
+      const sentence = "Hello there friend.";
+      const canned = new Map<string, FakeUtterance>([
+        [
+          sentence,
+          {
+            pcm: makePcm(1.2),
+            words: [
+              { text: "Hello", startS: 0, endS: 0.4, confidence: null },
+              { text: "there", startS: 0.4, endS: 0.8, confidence: null },
+              { text: "friend.", startS: 0.8, endS: 1.2, confidence: null },
+            ],
+          },
+        ],
+      ]);
+      const h = makeHarness({
+        sttFinals: ["What is my balance?"],
+        llmReplies: [sentence],
+        ttsCanned: canned,
+        config: { llmWarmupEnabled: false },
+      });
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      const turnId = currentTurnId(h);
+      const openerUtterance = openerUtterances(h)[0] as string;
+      // Reply fully sent but unacked; the opener was heard: barge the tail.
+      await h.session.handleMessage({ type: "playback.done", utteranceId: openerUtterance });
+      await h.session.handleMessage({ type: "playback.progress", utteranceId: turnId, playedMs: 500 });
+      await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
       expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: turnId });
-      expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: ackUtterance });
       expect(h.session.currentState).toBe("listening");
       // Still exactly one stored agent turn (no duplicate from the tail barge).
       expect(
         (h.store.interactions.get(h.interactionId())?.turns ?? []).filter((t) => t.speaker === "agent"),
       ).toHaveLength(1);
+      // History holds the opener plus the heard reply prefix.
+      h.stt.sessions[0]?.finals.push("Thanks.");
+      h.llm.replies.push("You are welcome.");
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 20 });
+      const lastMessages = h.llm.seenMessages[h.llm.seenMessages.length - 1] ?? [];
+      expect(lastMessages.filter((m) => m.role === "assistant")).toEqual([
+        { role: "assistant", content: "Let me check. Hello" },
+      ]);
     });
 
-    it("pre-renders every ack block while the notice plays", async () => {
+    it("an opener render failure never breaks the turn", async () => {
+      const h = makeHarness({
+        sttFinals: ["What is my balance?"],
+        llmReplies: ["Your balance is ten naira."],
+        config: { llmWarmupEnabled: false },
+      });
+      const render = h.blocks.render.bind(h.blocks);
+      vi.spyOn(h.blocks, "render").mockImplementation(
+        (block: BlockDefinition, opts: { orgName: string; voiceId: string }) => {
+          if (block.id.startsWith("opener_")) return Promise.reject(new Error("tts 429 throttled"));
+          return render(block, opts);
+        },
+      );
+      await completeNotice(h);
+      await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+      expect(openerBlockIds(h)).toHaveLength(0);
+      expect(h.logs.some((l) => l["msg"] === "opener.render_failed")).toBe(true);
+      // The turn completes without an opener note.
+      expect(h.sent.some((m) => m.type === "turn.metrics")).toBe(true);
+      expect(turnCalls(h)[0]).toHaveLength(2);
+      const agentTurn = (h.store.interactions.get(h.interactionId())?.turns ?? []).find(
+        (t) => t.speaker === "agent",
+      );
+      expect(agentTurn?.spokenText).toBe("Your balance is ten naira.");
+    });
+
+    it("pre-renders every opener block while the notice plays", async () => {
       const h = makeHarness();
       const rendered: string[] = [];
       const origRender = h.blocks.render.bind(h.blocks);
@@ -1455,12 +1842,12 @@ describe("VoiceSession", () => {
       });
       await completeNotice(h);
       await vi.waitFor(() => {
-        expect(rendered).toEqual(expect.arrayContaining(ACK_BLOCKS.map((b) => b.id)));
+        expect(rendered).toEqual(expect.arrayContaining(OPENER_BLOCKS.map((b) => b.id)));
       });
-      // The notice still comes first: acks never delay the handshake.
+      // The notice still comes first: openers never delay the handshake.
       expect(rendered[0]).toBe("disclose_ai");
-      const firstAck = Math.min(...ACK_BLOCKS.map((b) => rendered.indexOf(b.id)));
-      expect(rendered.indexOf("recording_notice")).toBeLessThan(firstAck);
+      const firstOpener = Math.min(...OPENER_BLOCKS.map((b) => rendered.indexOf(b.id)));
+      expect(rendered.indexOf("recording_notice")).toBeLessThan(firstOpener);
     });
   });
 
@@ -1638,40 +2025,31 @@ describe("VoiceSession", () => {
       }
     });
 
-    it("an ack does not start the silence window: prompt fires 8s after the reply is heard", async () => {
+    it("an opener does not start the silence window: prompt fires 8s after the reply is heard", async () => {
       vi.useFakeTimers();
       try {
-        // 8s of reply audio, so the backstop (duration+3s) cannot fire first.
+        // 8s of reply audio, so the backstop (opener+duration+3s) cannot fire first.
         const canned = new Map<string, FakeUtterance>([[SENTENCE, { pcm: makePcm(8), words: [] }]]);
         const h = makeHarness({
-          sttFinals: ["Hi."],
+          sttFinals: ["What is my balance?"],
           llmReplies: [SENTENCE],
           ttsCanned: canned,
           config: {
             llmWarmupEnabled: false,
-            ackDelayMs: 400,
             silencePromptAfterMs: 8000,
             silenceEndAfterMs: 20000,
           },
         });
         await completeNotice(h);
-        let openGate!: () => void;
-        const gate = new Promise<void>((resolve) => {
-          openGate = resolve;
-        });
-        h.llm.firstTokenGates.push(gate);
         const turnDone = h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
-        // The ack timer (400ms) fires while the LLM is still gated.
-        await vi.advanceTimersByTimeAsync(1000);
-        expect(ackBlockIds(h)).toHaveLength(1);
-        const ackUtterance = ackUtterances(h)[0] as string;
-        openGate();
         await vi.advanceTimersByTimeAsync(2000);
         await turnDone;
         expect(h.session.currentState).toBe("listening");
+        expect(openerBlockIds(h)).toHaveLength(1);
+        const openerUtterance = openerUtterances(h)[0] as string;
         const turnId = currentTurnId(h);
-        // Acking only the ack starts no window...
-        await h.session.handleMessage({ type: "playback.done", utteranceId: ackUtterance });
+        // Acking only the opener starts no window...
+        await h.session.handleMessage({ type: "playback.done", utteranceId: openerUtterance });
         await vi.advanceTimersByTimeAsync(8000);
         expect(hasSilencePrompt(h)).toBe(false);
         // ...the window starts when the reply is heard.
@@ -1679,6 +2057,38 @@ describe("VoiceSession", () => {
         await vi.advanceTimersByTimeAsync(7900);
         expect(hasSilencePrompt(h)).toBe(false);
         await vi.advanceTimersByTimeAsync(500);
+        expect(hasSilencePrompt(h)).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("missing playback.done: backstop covers opener plus reply audio", async () => {
+      vi.useFakeTimers();
+      try {
+        const audioSeconds = 8;
+        const canned = new Map<string, FakeUtterance>([
+          [SENTENCE, { pcm: makePcm(audioSeconds), words: [] }],
+        ]);
+        const h = makeHarness({
+          sttFinals: ["What is my balance?"],
+          llmReplies: [SENTENCE],
+          ttsCanned: canned,
+          config: { silencePromptAfterMs: 8000, silenceEndAfterMs: 20000 },
+        });
+        await completeNotice(h);
+        const turnStart = Date.now();
+        await h.session.handleMessage({ type: "input.speech_started", atMs: 0 });
+        const turnDone = h.session.handleMessage({ type: "input.speech_ended", atMs: 100 });
+        await vi.advanceTimersByTimeAsync(2000);
+        await turnDone;
+        expect(h.session.currentState).toBe("listening");
+        // Backstop fires at send-complete + opener + 8s reply + 3s margin, and
+        // the prompt a full 8s window after that (all late-biased).
+        await vi.advanceTimersByTimeAsync(turnStart + 18900 - Date.now());
+        expect(hasSilencePrompt(h)).toBe(false);
+        expect(h.logs.some((l) => l["msg"] === "silence.playback_backstop_used")).toBe(true);
+        await vi.advanceTimersByTimeAsync(turnStart + 22000 - Date.now());
         expect(hasSilencePrompt(h)).toBe(true);
       } finally {
         vi.useRealTimers();
@@ -1701,26 +2111,26 @@ function turnCalls(h: Harness): ChatMessage[][] {
   });
 }
 
-/** Block ids of ack utterances the server started (agent.text kind=block, ack_*). */
-function ackBlockIds(h: Harness): string[] {
+/** Block ids of opener utterances the server started (agent.text kind=block, opener_*). */
+function openerBlockIds(h: Harness): string[] {
   return h.sent
     .filter(
       (m) =>
         m.type === "agent.text" &&
         (m as { kind?: string }).kind === "block" &&
-        String((m as { blockId?: string }).blockId ?? "").startsWith("ack_"),
+        String((m as { blockId?: string }).blockId ?? "").startsWith("opener_"),
     )
     .map((m) => (m as { blockId?: string }).blockId as string);
 }
 
-/** Utterance ids of ack utterances the server started (in start order). */
-function ackUtterances(h: Harness): string[] {
+/** Utterance ids of opener utterances the server started (in start order). */
+function openerUtterances(h: Harness): string[] {
   return h.sent
     .filter(
       (m) =>
         m.type === "agent.text" &&
         (m as { kind?: string }).kind === "block" &&
-        String((m as { blockId?: string }).blockId ?? "").startsWith("ack_"),
+        String((m as { blockId?: string }).blockId ?? "").startsWith("opener_"),
     )
     .map((m) => (m as { utteranceId: string }).utteranceId);
 }
@@ -1734,36 +2144,53 @@ function turnAudioOrder(h: Harness): string[] {
     .map((m) => (m as { utteranceId: string }).utteranceId);
 }
 
-describe("truncateSpoken", () => {
+describe("attributeReplyAudio", () => {
+  it("splits bytes proportionally to text length, summing exactly", () => {
+    const sentences = [
+      { sentence: "Hi.", audioBytes: 0, durationS: 0 },
+      { sentence: "Hello there friend.", audioBytes: 0, durationS: 0 },
+    ];
+    attributeReplyAudio(sentences, 48000, 24000);
+    expect(sentences[0]?.audioBytes).toBeGreaterThan(0);
+    expect(sentences[1]?.audioBytes).toBeGreaterThan(sentences[0]?.audioBytes ?? 0);
+    expect((sentences[0]?.audioBytes ?? 0) + (sentences[1]?.audioBytes ?? 0)).toBe(48000);
+    for (const entry of sentences) {
+      expect(entry.audioBytes % 2).toBe(0);
+      expect(entry.durationS).toBe(entry.audioBytes / 2 / 24000);
+    }
+  });
+
+  it("is a no-op without sentences", () => {
+    attributeReplyAudio([], 48000, 24000);
+  });
+});
+
+describe("truncateReply", () => {
   const sentences = [
-    { sentence: "Hello there.", audioBytes: 9600, durationS: 0.2, words: [] as WordTiming[] },
-    {
-      sentence: "How can I help you today?",
-      audioBytes: 96000,
-      durationS: 2.0,
-      words: [
-        { text: "How", startS: 0, endS: 0.3, confidence: null },
-        { text: "can", startS: 0.3, endS: 0.6, confidence: null },
-        { text: "I", startS: 0.6, endS: 0.9, confidence: null },
-      ],
-    },
+    { sentence: "Hello there.", audioBytes: 9600, durationS: 0.2 },
+    { sentence: "How can I help you today?", audioBytes: 96000, durationS: 2.0 },
+  ];
+  // Absolute over the reply (one TTS context): sentence 2 starts at 200 ms.
+  const words: WordTiming[] = [
+    { text: "How", startS: 0.2, endS: 0.5, confidence: null },
+    { text: "can", startS: 0.5, endS: 0.8, confidence: null },
+    { text: "I", startS: 0.8, endS: 1.1, confidence: null },
   ];
 
   it("keeps whole sentences and truncates the partial one by word timestamps", () => {
     // 200 ms (first sentence) + 650 ms into the second: "How can".
-    expect(truncateSpoken(sentences, 850)).toBe("Hello there. How can");
+    expect(truncateReply(sentences, words, 850)).toBe("Hello there. How can");
   });
 
   it("returns everything when the full utterance was heard", () => {
-    expect(truncateSpoken(sentences, 5000)).toBe("Hello there. How can I help you today?");
+    expect(truncateReply(sentences, words, 5000)).toBe("Hello there. How can I help you today?");
   });
 
   it("drops the partial sentence without word timestamps", () => {
-    const noWords = sentences.map((s) => ({ ...s, words: [] }));
-    expect(truncateSpoken(noWords, 850)).toBe("Hello there.");
+    expect(truncateReply(sentences, [], 850)).toBe("Hello there.");
   });
 
   it("returns empty when nothing was heard", () => {
-    expect(truncateSpoken(sentences, 0)).toBe("");
+    expect(truncateReply(sentences, words, 0)).toBe("");
   });
 });

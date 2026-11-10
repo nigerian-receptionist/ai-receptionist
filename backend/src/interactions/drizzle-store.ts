@@ -233,6 +233,7 @@ export class DrizzleInteractionStore implements InteractionStore {
     agentId?: string,
   ): Promise<{
     agentId: string;
+    agentName: string;
     orgName: string;
     personaPrompt: string;
     voiceId: string | null;
@@ -257,6 +258,7 @@ export class DrizzleInteractionStore implements InteractionStore {
       if (!tenant) throw new NotFoundError("tenant");
       return {
         agentId: toPublicId("agt", row.id),
+        agentName: row.name,
         orgName: tenant.name,
         personaPrompt: row.personaPrompt,
         voiceId: row.voiceId,

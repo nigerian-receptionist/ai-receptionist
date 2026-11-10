@@ -25,7 +25,7 @@ export const envSchema = z.object({
   CARTESIA_VERSION: z.string().default("2025-04-16"),
   STT_MODEL: z.string().default("ink-2"),
   STT_LANGUAGE: z.string().default("en"),
-  TTS_MODEL: z.string().default("sonic-3.6"),
+  TTS_MODEL: z.string().default("sonic-3.6-2026-08-27"),
   /** Cartesia voice "seun" (Nigerian accent). See ADR 0007. */
   TTS_VOICE: z.string().default("63b389ff-8a8c-4013-a4d6-df3b893812df"),
   TTS_SAMPLE_RATE: z.coerce.number().int().default(24000),
@@ -43,10 +43,10 @@ export const envSchema = z.object({
   /** Fire a throwaway prefix-matching chat completion while the notice plays. */
   LLM_WARMUP_ENABLED: z.stringbool().default(true),
 
-  /** Play a pre-rendered ack when the LLM's first token is slow. */
-  ACK_ENABLED: z.stringbool().default(true),
-  /** First-token wait before the ack plays, in ms. */
-  ACK_DELAY_MS: z.coerce.number().int().positive().default(400),
+  /** Play a pre-rendered opener (matched to the caller's words) while the LLM runs. */
+  OPENER_ENABLED: z.stringbool().default(true),
+  /** Extra STT keyterms (comma-separated bias phrases; never caller data). */
+  STT_KEYTERMS: csv.default([]),
 
   /** End-of-turn silence the browser VAD waits for, in ms (AGENTS.md 10.3). */
   ENDPOINTING_SILENCE_MS: z.coerce.number().int().positive().default(600),

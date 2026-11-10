@@ -84,6 +84,7 @@ export interface InteractionStore {
     agentId?: string,
   ): Promise<{
     agentId: string;
+    agentName: string;
     orgName: string;
     personaPrompt: string;
     voiceId: string | null;

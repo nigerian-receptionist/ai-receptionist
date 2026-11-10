@@ -33,16 +33,20 @@ export class CartesiaStt implements SpeechToText {
     this.finalizeTimeoutMs = opts.finalizeTimeoutMs ?? 15_000;
   }
 
-  async startSession(opts: { sampleRate: number; language?: string }): Promise<SttStreamSession> {
-    const params = new URLSearchParams({
-      model: this.model,
-      encoding: "pcm_s16le",
-      sample_rate: String(opts.sampleRate),
-      cartesia_version: this.version,
-    });
-    const ws = new WebSocket(`wss://api.cartesia.ai/stt/websocket?${params.toString()}`, {
-      headers: { Authorization: `Bearer ${this.apiKey}` },
-    });
+  async startSession(opts: {
+    sampleRate: number;
+    language?: string;
+    keyterms?: string[];
+  }): Promise<SttStreamSession> {
+    const ws = new WebSocket(
+      buildSttUrl({
+        version: this.version,
+        model: this.model,
+        sampleRate: opts.sampleRate,
+        keyterms: opts.keyterms ?? [],
+      }),
+      { headers: { Authorization: `Bearer ${this.apiKey}` } },
+    );
     const session = new CartesiaSttSession(ws, {
       modelId: this.modelId,
       language: opts.language ?? "en",
@@ -52,6 +56,92 @@ export class CartesiaStt implements SpeechToText {
     await session.waitForOpen(this.connectTimeoutMs);
     return session;
   }
+}
+
+/** Cartesia STT keyterm limits (docs: keyterm prompting). */
+export const MAX_STT_KEYTERMS = 100;
+export const MAX_STT_KEYTERM_CHARS = 1200;
+
+/**
+ * Built-in Nigerian bias phrases: currency, identity acronyms, cities and
+ * common names. Tenant terms (org/agent names, STT_KEYTERMS) come first so
+ * truncation drops these before tenant-specific ones.
+ */
+export const DEFAULT_STT_KEYTERMS: readonly string[] = [
+  "naira",
+  "kobo",
+  "BVN",
+  "NIN",
+  "NUBAN",
+  "Lagos",
+  "Abuja",
+  "Ikeja",
+  "Lekki",
+  "Ibadan",
+  "Kano",
+  "Enugu",
+  "Port Harcourt",
+  "Adaeze",
+  "Chinedu",
+  "Ngozi",
+  "Emeka",
+  "Adebayo",
+  "Ibrahim",
+  "Aisha",
+];
+
+/**
+ * Build the keyterm list for one STT connection: org name, agent name, env
+ * extras, then built-ins. Dedupes, drops empties, and enforces the vendor
+ * limits (terms past the cap count as dropped so the caller can log it).
+ * Never pass caller data here.
+ */
+export function buildSttKeyterms(input: {
+  orgName?: string;
+  agentName?: string;
+  extra?: readonly string[];
+}): { terms: string[]; dropped: number } {
+  const seen = new Set<string>();
+  const terms: string[] = [];
+  let chars = 0;
+  let dropped = 0;
+  const add = (raw: string): void => {
+    const term = raw.trim().replace(/\s+/g, " ");
+    if (term === "" || seen.has(term.toLowerCase())) return;
+    if (terms.length >= MAX_STT_KEYTERMS || chars + term.length > MAX_STT_KEYTERM_CHARS) {
+      dropped += 1;
+      return;
+    }
+    seen.add(term.toLowerCase());
+    terms.push(term);
+    chars += term.length;
+  };
+  if (input.orgName !== undefined) add(input.orgName);
+  if (input.agentName !== undefined) add(input.agentName);
+  for (const term of input.extra ?? []) add(term);
+  for (const term of DEFAULT_STT_KEYTERMS) add(term);
+  return { terms, dropped };
+}
+
+/**
+ * STT WebSocket URL. Keyterms repeat the `keyterm` param with spaces encoded
+ * as `%20` (URLSearchParams would emit `+`, which the docs do not use).
+ */
+export function buildSttUrl(input: {
+  version: string;
+  model: string;
+  sampleRate: number;
+  keyterms: readonly string[];
+}): string {
+  const params = new URLSearchParams({
+    model: input.model,
+    encoding: "pcm_s16le",
+    sample_rate: String(input.sampleRate),
+    cartesia_version: input.version,
+  });
+  let query = params.toString();
+  for (const term of input.keyterms) query += `&keyterm=${encodeURIComponent(term)}`;
+  return `wss://api.cartesia.ai/stt/websocket?${query}`;
 }
 
 /** Frames held while the socket is still connecting (cap ~1.3 s at 20 ms/frame). */

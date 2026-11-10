@@ -48,16 +48,32 @@ export const SILENCE_PROMPT_BLOCK: BlockDefinition = {
 };
 
 /**
- * Instant acknowledgements played while the LLM's first token is slow. Same
- * cache/hash rules as every block. Each is neutral backchannel phrasing: it
- * asks for a moment of patience without promising any action, and stays well
- * under a second of audio. The session rotates through them in order.
+ * Openers: short pre-rendered first sentences chosen deterministically from
+ * the caller's words (see `../openers.ts`). The caller hears the opener while
+ * the LLM generates the rest of the reply, so each must stay under ~1.2 s of
+ * audio (verified live; the samples script prints durations). Same cache/hash
+ * rules as every block; rendered with the category's tone.
  */
-export const ACK_BLOCKS: BlockDefinition[] = [
-  { id: "ack_okay", version: 1, language: "en", template: "Okay." },
-  { id: "ack_right", version: 1, language: "en", template: "Right." },
-  { id: "ack_mmhmm", version: 1, language: "en", template: "Mm-hmm." },
-  { id: "ack_sure", version: 1, language: "en", template: "Sure." },
+export const OPENER_QUESTION_BLOCKS: BlockDefinition[] = [
+  { id: "opener_question_1", version: 1, language: "en", template: "Let me check." },
+  { id: "opener_question_2", version: 1, language: "en", template: "Okay, one moment." },
+];
+
+export const OPENER_PROBLEM_BLOCKS: BlockDefinition[] = [
+  { id: "opener_problem_1", version: 1, language: "en", template: "I'm sorry about that." },
+  { id: "opener_problem_2", version: 1, language: "en", template: "I understand." },
+];
+
+export const OPENER_CONFIRMATION_BLOCKS: BlockDefinition[] = [
+  { id: "opener_confirmation_1", version: 1, language: "en", template: "Okay." },
+  { id: "opener_confirmation_2", version: 1, language: "en", template: "Alright." },
+];
+
+/** Every opener block, for session-start pre-rendering (notice first). */
+export const OPENER_BLOCKS: BlockDefinition[] = [
+  ...OPENER_QUESTION_BLOCKS,
+  ...OPENER_PROBLEM_BLOCKS,
+  ...OPENER_CONFIRMATION_BLOCKS,
 ];
 
 /** Used when the TTS vendor exposes no model revision (see TTS_MODEL_REVISION). */

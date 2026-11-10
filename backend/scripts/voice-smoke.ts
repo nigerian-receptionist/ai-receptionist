@@ -58,13 +58,13 @@ async function main(): Promise<void> {
   // Notice-block playout tracking: ack only after the block could have played (F2).
   const noticeAudio = new Map<string, { firstAt: number; bytes: number }>();
   // Client-measured turn latency (AGENTS.md 10.4 budget, speech end -> agent speech).
-  // Ack audio and reply audio are stamped separately (ack utterance ids are
-  // learned from their agent.text); the headline stamp is the first of either.
+  // Opener audio and reply audio are stamped separately (opener utterance ids
+  // are learned from their agent.text); the headline stamp is the first of either.
   let tSpeechEndedSend = 0;
   let tFirstAgentAudio = 0;
-  let tFirstAckAudio = 0;
+  let tFirstOpenerAudio = 0;
   let tFirstReplyAudio = 0;
-  const ackUtterances = new Set<string>();
+  const openerUtterances = new Set<string>();
   const failures: string[] = [];
   const done = new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("smoke timed out waiting for turn.metrics")), 120_000);
@@ -83,7 +83,7 @@ async function main(): Promise<void> {
           break;
         case "agent.text":
           if (message.kind === "speech") agentText += message.delta;
-          else if (message.blockId?.startsWith("ack_")) ackUtterances.add(message.utteranceId);
+          else if (message.blockId?.startsWith("opener_")) openerUtterances.add(message.utteranceId);
           break;
         case "agent.audio": {
           const bytes = Buffer.from(message.pcmBase64, "base64").length;
@@ -96,8 +96,8 @@ async function main(): Promise<void> {
             audioBytes += bytes;
             const now = performance.now();
             if (tFirstAgentAudio === 0) tFirstAgentAudio = now;
-            if (ackUtterances.has(message.utteranceId)) {
-              if (tFirstAckAudio === 0) tFirstAckAudio = now;
+            if (openerUtterances.has(message.utteranceId)) {
+              if (tFirstOpenerAudio === 0) tFirstOpenerAudio = now;
             } else if (tFirstReplyAudio === 0) {
               tFirstReplyAudio = now;
             }
@@ -175,8 +175,10 @@ async function main(): Promise<void> {
     tSpeechEndedSend === 0 || tFirstAgentAudio === 0
       ? null
       : Math.round(tFirstAgentAudio - tSpeechEndedSend);
-  const clientAckFirstAudioMs =
-    tSpeechEndedSend === 0 || tFirstAckAudio === 0 ? null : Math.round(tFirstAckAudio - tSpeechEndedSend);
+  const clientOpenerFirstAudioMs =
+    tSpeechEndedSend === 0 || tFirstOpenerAudio === 0
+      ? null
+      : Math.round(tFirstOpenerAudio - tSpeechEndedSend);
   const clientReplyFirstAudioMs =
     tSpeechEndedSend === 0 || tFirstReplyAudio === 0
       ? null
@@ -184,7 +186,9 @@ async function main(): Promise<void> {
   console.log(`[smoke] agent text: ${JSON.stringify(agentText.trim())}`);
   console.log(`[smoke] agent audio: ${audioChunks} chunks, ${(audioBytes / 2 / 24000).toFixed(2)}s`);
   console.log(`[smoke] timings ms (server): ${JSON.stringify(metrics)}`);
-  console.log(`[smoke] client ack_first_audio ms: ${clientAckFirstAudioMs} (null when no ack played)`);
+  console.log(
+    `[smoke] client opener_first_audio ms: ${clientOpenerFirstAudioMs} (null when no opener played)`,
+  );
   console.log(`[smoke] client reply_first_audio ms: ${clientReplyFirstAudioMs}`);
   console.log(
     `[smoke] client end_to_first_audio ms: ${clientEndToFirstAudioMs} (AGENTS.md 10.4 target 1000-1500)`,
