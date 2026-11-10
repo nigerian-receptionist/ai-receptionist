@@ -3,8 +3,9 @@
  *
  * The data-layer implementation MUST:
  *   - run every call inside a transaction with `SET LOCAL app.tenant_id = <tenantId>` (RLS),
- *   - redact sensitive values (card numbers, BVN/NIN, NUBAN, OTP/PIN, phone numbers) from
- *     `text` and `spokenText` before writing (AGENTS.md 9.2 rule 10),
+ *   - redact sensitive values (card numbers, BVN/NIN, NUBAN, OTP/PIN, phone
+ *     numbers, emails, URLs) from `text` and `spokenText` before writing
+ *     (AGENTS.md 9.2 rule 10),
  *   - never log raw turn text.
  */
 
