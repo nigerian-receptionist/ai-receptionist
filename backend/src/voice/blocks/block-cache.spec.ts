@@ -8,6 +8,7 @@ import type { TextToSpeech, TtsResult, TtsStreamSession } from "../adapters/type
 import {
   blockCacheKey,
   BlockRenderer,
+  DEFAULT_MODEL_REVISION,
   DISCLOSE_AI_BLOCK,
   renderBlockText,
 } from "./block-cache";
@@ -57,8 +58,10 @@ function hashFor(tts: FakeBlockTts): string {
     language: DISCLOSE_AI_BLOCK.language,
     voiceId: "voice-1",
     modelId: tts.modelId,
+    modelRevision: DEFAULT_MODEL_REVISION,
     speed: 1,
     tone: "neutral",
+    outputSampleRate: 24000,
   });
 }
 
@@ -103,6 +106,34 @@ describe("BlockRenderer", () => {
     writeFileSync(join(dir, `${hashFor(tts)}.pcm`), Buffer.alloc(11));
     await renderer.render(DISCLOSE_AI_BLOCK, { orgName: "Acme", voiceId: "voice-1" });
     expect(tts.calls).toBe(2);
+  });
+
+  it("keys the cache by model revision and output sample rate (M18)", () => {
+    const base = {
+      text: "hello",
+      language: "en",
+      voiceId: "v",
+      modelId: "m",
+      speed: 1,
+      tone: "neutral",
+      modelRevision: "r1",
+      outputSampleRate: 24000,
+    };
+    expect(blockCacheKey({ ...base, modelRevision: "r2" })).not.toBe(blockCacheKey(base));
+    expect(blockCacheKey({ ...base, outputSampleRate: 16000 })).not.toBe(blockCacheKey(base));
+    expect(blockCacheKey(base)).toBe(blockCacheKey({ ...base }));
+  });
+
+  it("re-renders when the model revision changes instead of reusing stale audio", async () => {
+    const tts = new FakeBlockTts();
+    const dir = mkdtempSync(join(tmpdir(), "blocks-"));
+    const r1 = new BlockRenderer(tts, dir, { modelRevision: "r1" });
+    const first = await r1.render(DISCLOSE_AI_BLOCK, { orgName: "Acme", voiceId: "voice-1" });
+    expect(tts.calls).toBe(1);
+    const r2 = new BlockRenderer(tts, dir, { modelRevision: "r2" });
+    const second = await r2.render(DISCLOSE_AI_BLOCK, { orgName: "Acme", voiceId: "voice-1" });
+    expect(tts.calls).toBe(2);
+    expect(second.hash).not.toBe(first.hash);
   });
 
   it("requests the configured sample rate and rejects mismatches", async () => {

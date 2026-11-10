@@ -136,7 +136,7 @@ export class VoiceGateway implements OnGatewayConnection, OnGatewayDisconnect, O
           defaultVoiceId: this.env.TTS_VOICE,
         }),
         join(__dirname, "..", "..", ".cache", "blocks"),
-        { outputSampleRate: this.env.TTS_SAMPLE_RATE },
+        { outputSampleRate: this.env.TTS_SAMPLE_RATE, modelRevision: this.env.TTS_MODEL_REVISION },
       ),
       config: {
         ...DEFAULT_VOICE_SESSION_CONFIG,

@@ -29,6 +29,11 @@ export const envSchema = z.object({
   /** Cartesia voice "seun" (Nigerian accent). See ADR 0007. */
   TTS_VOICE: z.string().default("63b389ff-8a8c-4013-a4d6-df3b893812df"),
   TTS_SAMPLE_RATE: z.coerce.number().int().default(24000),
+  /**
+   * TTS model revision for the block-cache key (AGENTS.md 5.7, M18). Cartesia
+   * exposes no revision, so bump this whenever the TTS model changes.
+   */
+  TTS_MODEL_REVISION: z.string().min(1).default("unversioned"),
 
   MUSE_API_KEY: z.string().min(1),
   LLM_BASE_URL: z.string().url().default("https://api.meta.ai/v1"),
