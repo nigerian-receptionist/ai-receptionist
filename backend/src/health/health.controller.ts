@@ -1,10 +1,11 @@
-import { Controller, Get, ServiceUnavailableException } from "@nestjs/common";
+import { Controller, Get, Inject, ServiceUnavailableException } from "@nestjs/common";
 
 import { DbService } from "../db/db.service";
 
 @Controller()
 export class HealthController {
-  constructor(private readonly db: DbService) {}
+  // M6: explicit token — tsx/esbuild emit no decorator metadata.
+  constructor(@Inject(DbService) private readonly db: DbService) {}
 
   /** Reports that the process responds; this is not a dependency check. */
   @Get(["health", "v1/health"])

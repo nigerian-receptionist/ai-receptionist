@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, Inject, Param, Query, UseGuards } from "@nestjs/common";
 import { desc, eq, lt } from "drizzle-orm";
 import { z } from "zod";
 
@@ -65,7 +65,8 @@ function toTurnDto(row: TurnRow) {
 @Controller("v1/interactions")
 @UseGuards(DevAuthGuard)
 export class InteractionsController {
-  constructor(private readonly db: DbService) {}
+  // M6: explicit token — tsx/esbuild emit no decorator metadata.
+  constructor(@Inject(DbService) private readonly db: DbService) {}
 
   /** Newest first by UUIDv7 id (creation order), keyset-paginated, stable. */
   @Get()

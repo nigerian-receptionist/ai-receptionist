@@ -1,4 +1,4 @@
-import { Controller, Get, Query, UseGuards } from "@nestjs/common";
+import { Controller, Get, Inject, Query, UseGuards } from "@nestjs/common";
 import { asc, gt } from "drizzle-orm";
 import { z } from "zod";
 
@@ -19,7 +19,8 @@ const listQuerySchema = z.object({
 @Controller("v1/agents")
 @UseGuards(DevAuthGuard)
 export class AgentsController {
-  constructor(private readonly db: DbService) {}
+  // M6: explicit token — tsx/esbuild emit no decorator metadata.
+  constructor(@Inject(DbService) private readonly db: DbService) {}
 
   /** Oldest first by UUIDv7 id (creation order), keyset-paginated, stable. */
   @Get()
