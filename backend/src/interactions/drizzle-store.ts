@@ -1,60 +1,85 @@
-import { Injectable } from "@nestjs/common";
-import { eq } from "drizzle-orm";
+import { Inject, Injectable } from "@nestjs/common";
+import { and, asc, eq } from "drizzle-orm";
 
+import {
+  ConflictError,
+  InvalidStateError,
+  InvalidTurnError,
+  NotFoundError,
+} from "../common/errors";
 import { uuidv7 } from "../common/uuidv7";
 import { DbService } from "../db/db.service";
 import { agents, interactions, tenants, turns } from "../db/schema";
 import { redact } from "../privacy/redact";
-import { toPublicId, toRawId } from "./ids";
-import type {
-  EndReason,
-  InteractionStore,
-  RecordingState,
-  TurnRecord,
+import {
+  INTERACTION_STORE,
+  turnRecordSchema,
+  type EndReason,
+  type InteractionStore,
+  type RecordingState,
+  type TurnRecord,
 } from "./interaction-store";
+import { toPublicId, toRawId } from "./ids";
 
-const RECORDING_STATES: readonly RecordingState[] = [
-  "not_started",
-  "notice_playing",
-  "notice_confirmed",
-  "recording",
-];
+export { INTERACTION_STORE };
 
 const END_REASONS: readonly EndReason[] = ["caller_hangup", "agent_ended", "error", "timeout"];
 
+/** Forward-only recording machine (M25). Same-state re-sets are idempotent no-ops. */
+const RECORDING_TRANSITIONS: Record<RecordingState, readonly RecordingState[]> = {
+  not_started: ["notice_playing"],
+  notice_playing: ["notice_confirmed"],
+  notice_confirmed: ["recording"],
+  recording: [],
+};
+
+const RECORDABLE_STATES: readonly RecordingState[] = ["notice_confirmed", "recording"];
+
+function isUniqueViolation(error: unknown): boolean {
+  const cause = (error as { cause?: { code?: string } })?.cause;
+  if (cause?.code === "23505") return true;
+  const message = `${(error as { message?: string })?.message ?? ""} ${
+    (cause as { message?: string })?.message ?? ""
+  }`;
+  return /duplicate key|unique constraint/i.test(message);
+}
+
 /**
- * Postgres-backed InteractionStore. Every call runs inside `withTenant` (RLS),
- * and turn text is redacted before insert. Never logs turn text.
+ * Postgres InteractionStore. Every method runs inside `withTenant`, so RLS
+ * scopes all reads and writes; a row from another tenant reads as missing.
  */
 @Injectable()
 export class DrizzleInteractionStore implements InteractionStore {
-  constructor(private readonly db: DbService) {}
+  constructor(@Inject(DbService) private readonly db: DbService) {}
 
   async startInteraction(input: {
     tenantId: string;
     agentId: string;
     channel: "web_voice";
     direction: "inbound";
+    contactId?: string;
   }): Promise<{ interactionId: string }> {
     const agentRawId = toRawId(input.agentId, "agt");
     return this.db.withTenant(input.tenantId, async (tx) => {
-      const found = await tx
-        .select({ id: agents.id })
-        .from(agents)
-        .where(eq(agents.id, agentRawId))
-        .limit(1);
-      if (found.length === 0) throw new Error("Agent not found");
-      const id = uuidv7();
-      await tx.insert(interactions).values({
-        id,
-        tenantId: input.tenantId,
-        agentId: agentRawId,
-        channel: input.channel,
-        direction: input.direction,
-        status: "open",
-        recordingState: "not_started",
-      });
-      return { interactionId: toPublicId("int", id) };
+      const agent = (
+        await tx.select({ id: agents.id }).from(agents).where(eq(agents.id, agentRawId)).limit(1)
+      )[0];
+      if (!agent) throw new NotFoundError("agent");
+      const [row] = await tx
+        .insert(interactions)
+        .values({
+          id: uuidv7(),
+          tenantId: input.tenantId,
+          agentId: agent.id,
+          contactId: input.contactId ? toRawId(input.contactId, "con") : null,
+          channel: input.channel,
+          direction: input.direction,
+          status: "open",
+          recordingState: "not_started",
+        })
+        .returning({ id: interactions.id });
+      if (!row) throw new Error("Interaction insert returned no row");
+      return { interactionId: toPublicId("int", row.id) };
     });
   }
 
@@ -64,58 +89,118 @@ export class DrizzleInteractionStore implements InteractionStore {
     state: RecordingState,
     noticeProof?: { blockId: string; blockVersion: number; blockHash: string; deliveredAt: Date },
   ): Promise<void> {
-    if (!RECORDING_STATES.includes(state)) throw new Error("Invalid recording state");
     const rawId = toRawId(interactionId, "int");
     await this.db.withTenant(tenantId, async (tx) => {
-      const updated = await tx
+      const row = (
+        await tx
+          .select({
+            id: interactions.id,
+            recordingState: interactions.recordingState,
+            noticeBlockId: interactions.noticeBlockId,
+          })
+          .from(interactions)
+          .where(eq(interactions.id, rawId))
+          .limit(1)
+      )[0];
+      if (!row) throw new NotFoundError("interaction");
+      if (row.recordingState === state) {
+        // Idempotent re-set; still fill proof when newly provided.
+        if (noticeProof) {
+          await tx
+            .update(interactions)
+            .set({
+              noticeBlockId: noticeProof.blockId,
+              noticeBlockVersion: noticeProof.blockVersion,
+              noticeBlockHash: noticeProof.blockHash,
+              noticeDeliveredAt: noticeProof.deliveredAt,
+              updatedAt: new Date(),
+            })
+            .where(eq(interactions.id, rawId));
+        }
+        return;
+      }
+      const current = row.recordingState as RecordingState;
+      if (!RECORDING_TRANSITIONS[current].includes(state)) {
+        throw new InvalidStateError(`Illegal recording transition ${current} -> ${state}`);
+      }
+      if ((state === "notice_confirmed" || state === "recording") && !noticeProof && !row.noticeBlockId) {
+        throw new InvalidStateError(`Entering ${state} requires notice proof`);
+      }
+      await tx
         .update(interactions)
         .set({
           recordingState: state,
-          noticeBlockId: noticeProof?.blockId,
-          noticeBlockVersion: noticeProof?.blockVersion,
-          noticeBlockHash: noticeProof?.blockHash,
-          noticeDeliveredAt: noticeProof?.deliveredAt,
+          // Proof columns are written only when proof is provided, never
+          // cleared by a later proof-less transition.
+          ...(noticeProof
+            ? {
+                noticeBlockId: noticeProof.blockId,
+                noticeBlockVersion: noticeProof.blockVersion,
+                noticeBlockHash: noticeProof.blockHash,
+                noticeDeliveredAt: noticeProof.deliveredAt,
+              }
+            : {}),
           updatedAt: new Date(),
         })
-        .where(eq(interactions.id, rawId))
-        .returning({ id: interactions.id });
-      if (updated.length === 0) throw new Error("Interaction not found");
+        .where(eq(interactions.id, rawId));
     });
   }
 
   async appendTurn(tenantId: string, turn: TurnRecord): Promise<{ turnId: string }> {
-    const interactionRawId = toRawId(turn.interactionId, "int");
+    const parsed = turnRecordSchema.safeParse(turn);
+    if (!parsed.success) {
+      throw new InvalidTurnError(parsed.error.issues[0]?.message ?? "schema violation");
+    }
+    const rawId = toRawId(turn.interactionId, "int");
     return this.db.withTenant(tenantId, async (tx) => {
-      const found = await tx
-        .select({ id: interactions.id })
-        .from(interactions)
-        .where(eq(interactions.id, interactionRawId))
-        .limit(1);
-      if (found.length === 0) throw new Error("Interaction not found");
-      const id = uuidv7();
-      await tx.insert(turns).values({
-        id,
-        tenantId,
-        interactionId: interactionRawId,
-        seq: turn.seq,
-        speaker: turn.speaker,
-        text: redact(turn.text),
-        spokenText: turn.spokenText === undefined ? undefined : redact(turn.spokenText),
-        language: turn.language,
-        interrupted: turn.interrupted,
-        sttModelId: turn.sttModelId,
-        sttConfidence: turn.sttConfidence ?? null,
-        llmModel: turn.llmModel,
-        promptVersion: turn.promptVersion ?? null,
-        ttsModelId: turn.ttsModelId,
-        voiceId: turn.voiceId,
-        blockId: turn.blockId,
-        blockVersion: turn.blockVersion,
-        blockHash: turn.blockHash,
-        timingsMs: turn.timingsMs,
-        tokens: turn.tokens ?? null,
-      });
-      return { turnId: toPublicId("trn", id) };
+      const interaction = (
+        await tx
+          .select({ id: interactions.id, recordingState: interactions.recordingState })
+          .from(interactions)
+          .where(eq(interactions.id, rawId))
+          .limit(1)
+      )[0];
+      if (!interaction) throw new NotFoundError("interaction");
+      if (!RECORDABLE_STATES.includes(interaction.recordingState as RecordingState)) {
+        throw new InvalidStateError(
+          `Cannot append turns while recording is ${interaction.recordingState}`,
+        );
+      }
+      try {
+        const [row] = await tx
+          .insert(turns)
+          .values({
+            id: uuidv7(),
+            tenantId,
+            interactionId: rawId,
+            seq: turn.seq,
+            speaker: turn.speaker,
+            text: redact(turn.text),
+            spokenText: turn.spokenText === undefined ? null : redact(turn.spokenText),
+            language: turn.language,
+            interrupted: turn.interrupted,
+            sttModelId: turn.sttModelId,
+            sttConfidence: turn.sttConfidence ?? null,
+            llmModel: turn.llmModel,
+            promptVersion: turn.promptVersion ?? null,
+            ttsModelId: turn.ttsModelId,
+            voiceId: turn.voiceId,
+            blockId: turn.blockId,
+            blockVersion: turn.blockVersion,
+            blockHash: turn.blockHash,
+            timingsMs: turn.timingsMs,
+            tokens: turn.tokens ?? null,
+          })
+          .returning({ id: turns.id });
+        if (!row) throw new Error("Turn insert returned no row");
+        return { turnId: toPublicId("trn", row.id) };
+      } catch (error) {
+        if (error instanceof NotFoundError || error instanceof InvalidStateError) throw error;
+        if (isUniqueViolation(error)) {
+          throw new ConflictError(`Duplicate turn seq ${turn.seq}`);
+        }
+        throw error;
+      }
     });
   }
 
@@ -139,13 +224,13 @@ export class DrizzleInteractionStore implements InteractionStore {
         })
         .where(eq(interactions.id, rawId))
         .returning({ id: interactions.id });
-      if (updated.length === 0) throw new Error("Interaction not found");
+      if (updated.length === 0) throw new NotFoundError("interaction");
     });
   }
 
   async getAgentForSession(
     tenantId: string,
-    agentId: string | undefined,
+    agentId?: string,
   ): Promise<{
     agentId: string;
     orgName: string;
@@ -154,25 +239,28 @@ export class DrizzleInteractionStore implements InteractionStore {
     language: string;
   }> {
     return this.db.withTenant(tenantId, async (tx) => {
-      const rows =
+      const row = (
         agentId === undefined
-          ? await tx.select().from(agents).orderBy(agents.createdAt).limit(1)
-          : await tx.select().from(agents).where(eq(agents.id, toRawId(agentId, "agt"))).limit(1);
-      const agent = rows[0];
-      if (agent === undefined) throw new Error("Agent not found");
-      const tenantRows = await tx
-        .select({ name: tenants.name })
-        .from(tenants)
-        .where(eq(tenants.id, tenantId))
-        .limit(1);
-      const tenant = tenantRows[0];
-      if (tenant === undefined) throw new Error("Tenant not found");
+          ? // Default pick: oldest active agent (stable, skips retired drafts).
+            await tx
+              .select()
+              .from(agents)
+              .where(and(eq(agents.tenantId, tenantId), eq(agents.status, "active")))
+              .orderBy(asc(agents.createdAt), asc(agents.id))
+              .limit(1)
+          : await tx.select().from(agents).where(eq(agents.id, toRawId(agentId, "agt"))).limit(1)
+      )[0];
+      if (!row) throw new NotFoundError("agent");
+      const tenant = (
+        await tx.select({ name: tenants.name }).from(tenants).where(eq(tenants.id, tenantId)).limit(1)
+      )[0];
+      if (!tenant) throw new NotFoundError("tenant");
       return {
-        agentId: toPublicId("agt", agent.id),
+        agentId: toPublicId("agt", row.id),
         orgName: tenant.name,
-        personaPrompt: agent.personaPrompt,
-        voiceId: agent.voiceId,
-        language: agent.language,
+        personaPrompt: row.personaPrompt,
+        voiceId: row.voiceId,
+        language: row.language,
       };
     });
   }

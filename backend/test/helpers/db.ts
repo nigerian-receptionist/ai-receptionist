@@ -22,6 +22,21 @@ export function createTestDb(): {
   return { pool, service, store: new DrizzleInteractionStore(service) };
 }
 
+export async function createTenantAgent(
+  service: DbService,
+  tenantId: string,
+  name: string,
+  status: "active" | "retired" | "draft" = "active",
+): Promise<{ agentId: string }> {
+  const agentId = uuidv7();
+  await service.withTenant(tenantId, async (tx) => {
+    await tx
+      .insert(schema.agents)
+      .values({ id: agentId, tenantId, name, personaPrompt: "test", status });
+  });
+  return { agentId: `agt_${agentId}` };
+}
+
 export async function createTenantWithAgent(
   service: DbService,
   name: string,

@@ -9,9 +9,20 @@
  *   - never log raw turn text.
  */
 
+import { z } from "zod";
+
 export type RecordingState = "not_started" | "notice_playing" | "notice_confirmed" | "recording";
 
 export type EndReason = "caller_hangup" | "agent_ended" | "error" | "timeout";
+
+/** Contract validation for turn writes (both stores enforce it). */
+export const turnRecordSchema = z.object({
+  interactionId: z.string().min(1),
+  seq: z.number().int().positive(),
+  speaker: z.enum(["caller", "agent"]),
+  text: z.string().min(1),
+  language: z.string().min(1),
+});
 
 export interface TurnRecord {
   interactionId: string;
@@ -70,7 +81,7 @@ export interface InteractionStore {
   /** Loads the agent config the gateway needs (persona prompt, voice, language, org name). */
   getAgentForSession(
     tenantId: string,
-    agentId: string | undefined,
+    agentId?: string,
   ): Promise<{
     agentId: string;
     orgName: string;

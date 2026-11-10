@@ -71,6 +71,16 @@ export const contacts = pgTable(
   ],
 );
 
+/**
+ * Tenant-linkage invariant: foreign keys below reference the parent `id`
+ * only, NOT `(id, tenant_id)`. Cross-tenant linkage (e.g. an interaction
+ * pointing at another tenant's agent) is prevented at the application layer:
+ * every store read/write runs inside `withTenant`, so a foreign row reads as
+ * missing (NotFoundError) outside its tenant — covered by the store and leak
+ * suites. Composite `(id, tenant_id)` foreign keys would enforce this in the
+ * database and are the preferred follow-up if the write paths ever bypass
+ * the store.
+ */
 export const interactions = pgTable(
   "interactions",
   {

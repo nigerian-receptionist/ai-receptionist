@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { InvalidPhoneError } from "../../src/common/errors";
 import { normalizePhoneToE164 } from "../../src/contacts/phone";
 
 describe("normalizePhoneToE164", () => {
@@ -15,5 +16,10 @@ describe("normalizePhoneToE164", () => {
 
   it.each(["123", "not a number", "", "0803"])("rejects %s", (input) => {
     expect(() => normalizePhoneToE164(input)).toThrow("Invalid phone number");
+  });
+
+  it("rejects non-string input with InvalidPhoneError (no TypeError)", () => {
+    expect(() => normalizePhoneToE164(undefined as unknown as string)).toThrow(InvalidPhoneError);
+    expect(() => normalizePhoneToE164(null as unknown as string)).toThrow(InvalidPhoneError);
   });
 });
