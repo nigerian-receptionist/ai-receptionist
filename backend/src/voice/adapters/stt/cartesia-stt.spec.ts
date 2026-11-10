@@ -3,7 +3,14 @@ import { EventEmitter } from "node:events";
 import { describe, expect, it } from "vitest";
 import WebSocket from "ws";
 
-import { CartesiaSttSession } from "./cartesia-stt";
+import {
+  buildSttKeyterms,
+  buildSttUrl,
+  CartesiaSttSession,
+  DEFAULT_STT_KEYTERMS,
+  MAX_STT_KEYTERM_CHARS,
+  MAX_STT_KEYTERMS,
+} from "./cartesia-stt";
 
 class FakeWs extends EventEmitter {
   readyState: number = WebSocket.OPEN;
@@ -151,5 +158,59 @@ describe("CartesiaSttSession", () => {
     expect(session.droppedAudioFrames).toBe(1);
     ws.close();
     await session.close();
+  });
+});
+
+describe("buildSttKeyterms", () => {
+  it("orders org, agent, extras, then built-ins, deduped", () => {
+    const { terms, dropped } = buildSttKeyterms({
+      orgName: "Demo Microfinance Ltd",
+      agentName: "Ada",
+      extra: ["loan officer", "naira", "  "],
+    });
+    expect(dropped).toBe(0);
+    expect(terms.slice(0, 3)).toEqual(["Demo Microfinance Ltd", "Ada", "loan officer"]);
+    expect(terms.filter((term) => term.toLowerCase() === "naira")).toHaveLength(1);
+    expect(terms).toContain("Lagos");
+    expect(terms).not.toContain("");
+  });
+
+  it("enforces the 100-term cap and counts dropped terms", () => {
+    const extra = Array.from({ length: 150 }, (_, i) => `term-${i}`);
+    const { terms, dropped } = buildSttKeyterms({ orgName: "Org", extra });
+    expect(terms).toHaveLength(MAX_STT_KEYTERMS);
+    expect(terms[0]).toBe("Org");
+    expect(dropped).toBe(1 + extra.length + DEFAULT_STT_KEYTERMS.length - MAX_STT_KEYTERMS);
+  });
+
+  it("enforces the 1200-char cap, keeping tenant terms first", () => {
+    const extra = [`${"x".repeat(1100)}`, "naira", "lagos"];
+    const { terms, dropped } = buildSttKeyterms({ orgName: "Org", extra });
+    const chars = terms.reduce((sum, term) => sum + term.length, 0);
+    expect(chars).toBeLessThanOrEqual(MAX_STT_KEYTERM_CHARS);
+    expect(terms).toContain("Org");
+    expect(dropped).toBeGreaterThan(0);
+  });
+
+  it("collapses whitespace inside phrases", () => {
+    const { terms } = buildSttKeyterms({ orgName: "  First   Bank " });
+    expect(terms[0]).toBe("First Bank");
+  });
+});
+
+describe("buildSttUrl", () => {
+  it("repeats the keyterm param with %20-encoded spaces", () => {
+    const url = buildSttUrl({ version: "v", model: "ink-2", sampleRate: 16000, keyterms: [] });
+    expect(url).toBe(
+      "wss://api.cartesia.ai/stt/websocket?model=ink-2&encoding=pcm_s16le&sample_rate=16000&cartesia_version=v",
+    );
+    const withTerms = buildSttUrl({
+      version: "v",
+      model: "ink-2",
+      sampleRate: 16000,
+      keyterms: ["Naira", "First Bank"],
+    });
+    expect(withTerms).toContain("&keyterm=Naira&keyterm=First%20Bank");
+    expect(withTerms).not.toContain("+");
   });
 });

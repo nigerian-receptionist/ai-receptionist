@@ -1,8 +1,10 @@
 import WebSocket from "ws";
 
+import { TONE_TO_EMOTION } from "../../tone";
 import type {
   AudioChunk,
   TextToSpeech,
+  TtsReplyStream,
   TtsResult,
   TtsStreamEvent,
   TtsStreamSession,
@@ -12,9 +14,10 @@ import type {
 
 /**
  * Cartesia Sonic TTS. Streaming synthesis goes over one warm WebSocket per
- * voice session (`wss://api.cartesia.ai/tts/websocket`) with sentences
- * multiplexed by context id; one-shot synthesis (pre-rendered blocks) uses
- * REST `POST /tts/bytes`.
+ * voice session (`wss://api.cartesia.ai/tts/websocket`) with one context per
+ * agent reply: sentences stream in as continuations (`continue: true`) and the
+ * reply ends with an empty `continue: false`, so prosody stays seamless.
+ * One-shot synthesis (pre-rendered blocks) uses REST `POST /tts/bytes`.
  * See https://docs.cartesia.ai/api-reference/tts/websocket
  */
 export class CartesiaTts implements TextToSpeech {
@@ -26,6 +29,7 @@ export class CartesiaTts implements TextToSpeech {
   private readonly connectTimeoutMs: number;
   private readonly firstAudioTimeoutMs: number;
   private readonly restTimeoutMs: number;
+  private readonly maxBufferDelayMs: number;
 
   constructor(opts: {
     apiKey: string;
@@ -35,6 +39,12 @@ export class CartesiaTts implements TextToSpeech {
     connectTimeoutMs?: number;
     firstAudioTimeoutMs?: number;
     restTimeoutMs?: number;
+    /**
+     * Server-side input buffer per request. We already buffer client-side per
+     * sentence, for which the docs recommend 0 (the default); token-by-token
+     * streaming would want the 3000 ms default instead.
+     */
+    maxBufferDelayMs?: number;
   }) {
     this.apiKey = opts.apiKey;
     this.version = opts.version;
@@ -44,6 +54,7 @@ export class CartesiaTts implements TextToSpeech {
     this.connectTimeoutMs = opts.connectTimeoutMs ?? 10_000;
     this.firstAudioTimeoutMs = opts.firstAudioTimeoutMs ?? 20_000;
     this.restTimeoutMs = opts.restTimeoutMs ?? 30_000;
+    this.maxBufferDelayMs = opts.maxBufferDelayMs ?? 0;
   }
 
   voices(): VoiceInfo[] {
@@ -52,7 +63,7 @@ export class CartesiaTts implements TextToSpeech {
         voiceId: this.defaultVoiceId,
         language: "en",
         gender: "unspecified",
-        tones: ["neutral", "calm", "angry", "content", "sad"],
+        tones: Object.keys(TONE_TO_EMOTION),
       },
     ];
   }
@@ -131,17 +142,23 @@ export class CartesiaTts implements TextToSpeech {
       modelId: this.modelId,
       sampleRate: opts.sampleRate,
       firstAudioTimeoutMs: this.firstAudioTimeoutMs,
+      maxBufferDelayMs: this.maxBufferDelayMs,
     });
     await session.waitForOpen(this.connectTimeoutMs);
     return session;
   }
 }
 
-/** Map our tone name to a Cartesia emotion, or omit it (model interprets subtext). */
+/**
+ * Map a session tone name to a Cartesia emotion, or omit it (the model reads
+ * the subtext). Strict: only allow-listed tone names map — anything else
+ * (angry, sarcastic, threatening, ...) omits, even when Cartesia documents
+ * the value. An unmapped value must never reach the vendor.
+ */
 export function toCartesiaEmotion(tone: string | undefined): string | undefined {
-  if (tone === "neutral" || tone === "calm" || tone === "angry" || tone === "content") return tone;
-  if (tone === "sad" || tone === "apologetic") return "sad";
-  return undefined;
+  if (tone === undefined) return undefined;
+  const mapped: string | null | undefined = (TONE_TO_EMOTION as Record<string, string | null>)[tone];
+  return mapped ?? undefined;
 }
 
 function generationConfig(
@@ -172,19 +189,27 @@ export class CartesiaTtsSession implements TtsStreamSession {
   private readonly modelId: string;
   private readonly sampleRate: number;
   private readonly firstAudioTimeoutMs: number;
+  private readonly maxBufferDelayMs: number;
   private readonly contexts = new Map<string, ContextState>();
   private failed: Error | null = null;
   private closed = false;
 
   constructor(
     ws: WebSocket,
-    opts: { model: string; modelId: string; sampleRate: number; firstAudioTimeoutMs: number },
+    opts: {
+      model: string;
+      modelId: string;
+      sampleRate: number;
+      firstAudioTimeoutMs: number;
+      maxBufferDelayMs?: number;
+    },
   ) {
     this.ws = ws;
     this.model = opts.model;
     this.modelId = opts.modelId;
     this.sampleRate = opts.sampleRate;
     this.firstAudioTimeoutMs = opts.firstAudioTimeoutMs;
+    this.maxBufferDelayMs = opts.maxBufferDelayMs ?? 0;
     ws.on("message", (raw) => this.handleMessage(raw.toString()));
     ws.on("error", (error) => this.fail(error));
     ws.on("close", () => this.fail(new Error("tts websocket closed unexpectedly")));
@@ -209,17 +234,14 @@ export class CartesiaTtsSession implements TtsStreamSession {
     });
   }
 
-  async *speak(
-    text: string,
-    opts: {
-      voiceId: string;
-      language: string;
-      tone?: string;
-      speed?: number;
-      contextId: string;
-      signal?: AbortSignal;
-    },
-  ): AsyncIterable<TtsStreamEvent> {
+  speakReply(opts: {
+    voiceId: string;
+    language: string;
+    tone?: string;
+    speed?: number;
+    contextId: string;
+    signal?: AbortSignal;
+  }): TtsReplyStream {
     if (this.failed) throw this.failed;
     if (this.closed) throw new Error("tts session closed");
     if (this.contexts.has(opts.contextId)) throw new Error("duplicate tts context id");
@@ -234,6 +256,21 @@ export class CartesiaTtsSession implements TtsStreamSession {
       startedAt: performance.now(),
     };
     this.contexts.set(opts.contextId, state);
+    // Fields shared by every input on the context (docs: only transcript and
+    // continue may vary). The emotion is one per reply.
+    const shared = {
+      model_id: this.model,
+      voice: { id: opts.voiceId },
+      output_format: { container: "raw", encoding: "pcm_s16le", sample_rate: this.sampleRate },
+      language: opts.language,
+      context_id: opts.contextId,
+      add_timestamps: true,
+      max_buffer_delay_ms: this.maxBufferDelayMs,
+      generation_config: generationConfig(opts.tone, opts.speed),
+    };
+    let pushes = 0;
+    let replyFinished = false;
+    let eventsConsumed = false;
     const onAbort = (): void => {
       this.cancelContext(opts.contextId);
       state.error = state.error ?? abortError();
@@ -246,49 +283,57 @@ export class CartesiaTtsSession implements TtsStreamSession {
         state.waiter?.();
       }
     }, this.firstAudioTimeoutMs);
-    try {
-      this.ws.send(
-        JSON.stringify({
-          model_id: this.model,
-          transcript: text === "" ? " " : text,
-          voice: { id: opts.voiceId },
-          output_format: {
-            container: "raw",
-            encoding: "pcm_s16le",
-            sample_rate: this.sampleRate,
-          },
-          language: opts.language,
-          context_id: opts.contextId,
-          continue: false,
-          add_timestamps: true,
-          generation_config: generationConfig(opts.tone, opts.speed),
-        }),
-      );
-      let isFirst = true;
-      for (;;) {
-        // Check errors BEFORE draining: post-abort buffered chunks are stale
-        // and must never leak past a cancel.
-        if (state.error) throw state.error;
-        while (state.queue.length > 0) {
-          const event = state.queue.shift();
-          if (!event) break;
-          if (event.kind === "audio") {
-            event.chunk.isFirst = isFirst;
-            isFirst = false;
+    return {
+      push: (text: string): void => {
+        if (replyFinished) throw new Error("tts push after finish");
+        // A barge-in racing the push is normal: drop it locally. The vendor
+        // cancel only halts inputs not yet generating, so the local error
+        // below is what keeps stale audio from leaking past the cancel.
+        if (state.error) return;
+        this.ws.send(JSON.stringify({ ...shared, transcript: text, continue: true }));
+        pushes += 1;
+      },
+      finish: (): void => {
+        if (replyFinished) return;
+        replyFinished = true;
+        if (pushes === 0) throw new Error("tts reply finished without input");
+        if (state.error) return;
+        this.ws.send(JSON.stringify({ ...shared, transcript: "", continue: false }));
+      },
+      events: (): AsyncIterable<TtsStreamEvent> => {
+        if (eventsConsumed) throw new Error("tts reply events consumed twice");
+        eventsConsumed = true;
+        const contexts = this.contexts;
+        return (async function* (): AsyncGenerator<TtsStreamEvent> {
+          try {
+            let isFirst = true;
+            for (;;) {
+              // Check errors BEFORE draining: post-abort buffered chunks are
+              // stale and must never leak past a cancel.
+              if (state.error) throw state.error;
+              while (state.queue.length > 0) {
+                const event = state.queue.shift();
+                if (!event) break;
+                if (event.kind === "audio") {
+                  event.chunk.isFirst = isFirst;
+                  isFirst = false;
+                }
+                yield event;
+              }
+              if (state.finished) return;
+              await new Promise<void>((resolve) => {
+                state.waiter = resolve;
+              });
+              state.waiter = null;
+            }
+          } finally {
+            clearTimeout(firstAudioTimer);
+            opts.signal?.removeEventListener("abort", onAbort);
+            contexts.delete(opts.contextId);
           }
-          yield event;
-        }
-        if (state.finished) return;
-        await new Promise<void>((resolve) => {
-          state.waiter = resolve;
-        });
-        state.waiter = null;
-      }
-    } finally {
-      clearTimeout(firstAudioTimer);
-      opts.signal?.removeEventListener("abort", onAbort);
-      this.contexts.delete(opts.contextId);
-    }
+        })();
+      },
+    };
   }
 
   async close(): Promise<void> {
@@ -370,6 +415,12 @@ export class CartesiaTtsSession implements TtsStreamSession {
       });
       state.finished = true;
       state.waiter?.();
+      return;
+    }
+    if (message.type === "flush_done") {
+      // We never send flush (per-sentence mapping comes from ordered audio +
+      // absolute word timestamps instead), but tolerate the ack if one ever
+      // arrives.
       return;
     }
     if (message.type === "error") {
