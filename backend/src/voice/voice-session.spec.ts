@@ -100,45 +100,56 @@ interface FakeUtterance {
 }
 
 class FakeTtsSession implements TtsStreamSession {
+  /** Context ids that saw an abort, vs ran to `done` (abort-handover tests). */
+  readonly abortedContexts: string[] = [];
+  readonly completedContexts: string[] = [];
   /**
    * text -> canned audio; default one chunk per sentence. When `gate` is set,
    * speak parks after the first audio chunk until the gate opens, so tests can
-   * interrupt deterministically mid-utterance.
+   * interrupt deterministically mid-utterance. `gateFor` gates per text.
    */
   constructor(
     private readonly canned: Map<string, FakeUtterance> = new Map(),
     private gate: Promise<void> | null = null,
     private readonly spokenLog: string[] | null = null,
+    private readonly gateFor: ((text: string) => Promise<void> | null) | null = null,
   ) {}
   async *speak(
     text: string,
     opts: { contextId: string; signal?: AbortSignal },
   ): AsyncIterable<TtsStreamEvent> {
     this.spokenLog?.push(text);
-    const found = this.canned.get(text);
-    const pcm = found?.pcm ?? makePcm(0.3);
-    const words = found?.words ?? [];
-    yield { kind: "audio", chunk: { pcmS16le: pcm, sampleRate: 24000, isFirst: true, isLast: true } };
-    if (opts.signal?.aborted) throw aborted();
-    await tick();
-    if (words.length > 0) yield { kind: "timestamps", words };
-    if (opts.signal?.aborted) throw aborted();
-    if (this.gate) await this.gate;
-    if (opts.signal?.aborted) throw aborted();
-    yield {
-      kind: "done",
-      result: {
-        pcmS16le: Buffer.alloc(0),
-        sampleRate: 24000,
-        durationS: pcm.length / 2 / 24000,
-        timeToFirstAudioS: 0.01,
-        totalLatencyS: 0.02,
-        voiceId: "fake",
-        modelId: "tts_fake@test",
-        textSpoken: text,
-        words,
-      },
-    };
+    try {
+      const found = this.canned.get(text);
+      const pcm = found?.pcm ?? makePcm(0.3);
+      const words = found?.words ?? [];
+      yield { kind: "audio", chunk: { pcmS16le: pcm, sampleRate: 24000, isFirst: true, isLast: true } };
+      if (opts.signal?.aborted) throw aborted();
+      await tick();
+      if (words.length > 0) yield { kind: "timestamps", words };
+      if (opts.signal?.aborted) throw aborted();
+      const gate = this.gateFor?.(text) ?? this.gate;
+      if (gate) await gate;
+      if (opts.signal?.aborted) throw aborted();
+      yield {
+        kind: "done",
+        result: {
+          pcmS16le: Buffer.alloc(0),
+          sampleRate: 24000,
+          durationS: pcm.length / 2 / 24000,
+          timeToFirstAudioS: 0.01,
+          totalLatencyS: 0.02,
+          voiceId: "fake",
+          modelId: "tts_fake@test",
+          textSpoken: text,
+          words,
+        },
+      };
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") this.abortedContexts.push(opts.contextId);
+      throw error;
+    }
+    this.completedContexts.push(opts.contextId);
   }
   async close(): Promise<void> {}
 }
@@ -151,8 +162,9 @@ class FakeTts implements TextToSpeech {
     canned: Map<string, FakeUtterance> = new Map(),
     gate: Promise<void> | null = null,
     private readonly blockSeconds = 0.05,
+    gateFor: ((text: string) => Promise<void> | null) | null = null,
   ) {
-    this.ttsSession = new FakeTtsSession(canned, gate, this.spoken);
+    this.ttsSession = new FakeTtsSession(canned, gate, this.spoken, gateFor);
   }
   voices() {
     return [{ voiceId: "fake-voice", language: "en", gender: "unspecified", tones: ["neutral"] }];
@@ -231,6 +243,7 @@ function makeHarness(opts: {
   llmReplies?: string[];
   ttsCanned?: Map<string, FakeUtterance>;
   ttsGate?: Promise<void> | null;
+  ttsGateFor?: ((text: string) => Promise<void> | null) | null;
   blockSeconds?: number;
   config?: Partial<VoiceSessionConfig>;
 } = {}): Harness {
@@ -239,7 +252,7 @@ function makeHarness(opts: {
   const logs: Record<string, unknown>[] = [];
   const store = new InMemoryInteractionStore();
   const stt = new FakeStt(opts.sttFinals ?? []);
-  const tts = new FakeTts(opts.ttsCanned, opts.ttsGate ?? null, opts.blockSeconds);
+  const tts = new FakeTts(opts.ttsCanned, opts.ttsGate ?? null, opts.blockSeconds, opts.ttsGateFor ?? null);
   const llm = new FakeLlm(opts.llmReplies ?? []);
   const blocks = new BlockRenderer(tts, mkdtempSync(join(tmpdir(), "blocks-")));
   const session = new VoiceSession({
@@ -649,6 +662,153 @@ describe("VoiceSession", () => {
     expect(finals).toHaveLength(1);
     expect(finals[0]).toMatchObject({ text: "fresh turn" });
     expect(h.session.currentState).toBe("listening");
+  });
+
+  it("M3: a stale playback.interrupted does not kill the current turn", async () => {
+    let openGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      openGate = resolve;
+    });
+    const h = makeHarness({ sttFinals: ["Hi."], llmReplies: ["Hello there friend."], ttsGate: gate });
+    await completeNotice(h);
+    const turnPromise = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    await vi.waitFor(() => {
+      expect(h.sent.some((m) => m.type === "transcript.final")).toBe(true);
+    });
+    const turnId = currentTurnId(h);
+    await vi.waitFor(() => {
+      expect(
+        h.sent.some((m) => m.type === "agent.audio" && (m as { utteranceId: string }).utteranceId === turnId),
+      ).toBe(true);
+    });
+    // Stale interrupt for a long-gone utterance: must be ignored.
+    await h.session.handleMessage({ type: "playback.interrupted", utteranceId: "stale-turn", playedMs: 9999 });
+    expect(h.sent.some((m) => m.type === "agent.cancelled")).toBe(false);
+    openGate();
+    await turnPromise;
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns.find((t) => t.speaker === "agent")).toMatchObject({ interrupted: false });
+  });
+
+  it("M4: a slow-teardown turn cannot unplug the next turn (abort handover)", async () => {
+    let openGate1!: () => void;
+    let openGate2!: () => void;
+    const gate1 = new Promise<void>((resolve) => {
+      openGate1 = resolve;
+    });
+    const gate2 = new Promise<void>((resolve) => {
+      openGate2 = resolve;
+    });
+    const h = makeHarness({
+      sttFinals: ["first call", "second call"],
+      llmReplies: ["First turn here.", "Second turn here."],
+      ttsGateFor: (text) => (text.includes("First") ? gate1 : gate2),
+    });
+    await completeNotice(h);
+    const turn1 = h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    await vi.waitFor(() => {
+      expect(h.sent.some((m) => m.type === "transcript.final")).toBe(true);
+    });
+    const turn1Id = currentTurnId(h);
+    await vi.waitFor(() => {
+      expect(
+        h.sent.some((m) => m.type === "agent.audio" && (m as { utteranceId: string }).utteranceId === turn1Id),
+      ).toBe(true);
+    });
+    // Barge turn 1; its TTS stays parked on gate1 (aborted, not released).
+    await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+    const turn2 = h.session.handleMessage({ type: "input.speech_ended", atMs: 20 });
+    await vi.waitFor(() => {
+      expect(h.sent.filter((m) => m.type === "transcript.final")).toHaveLength(2);
+    });
+    const finals = h.sent.filter((m) => m.type === "transcript.final");
+    const last = finals[finals.length - 1];
+    if (last?.type !== "transcript.final") throw new Error("no second final");
+    const turn2Id = last.turnId;
+    await vi.waitFor(() => {
+      expect(
+        h.sent.some((m) => m.type === "agent.audio" && (m as { utteranceId: string }).utteranceId === turn2Id),
+      ).toBe(true);
+    });
+    // Turn 1's teardown lands AFTER turn 2 assigned fresh controllers...
+    openGate1();
+    await turn1;
+    // ...so barging turn 2 must still cancel its TTS.
+    await h.session.handleMessage({ type: "playback.interrupted", utteranceId: turn2Id, playedMs: 10 });
+    openGate2();
+    await turn2;
+    expect(h.tts.ttsSession.abortedContexts).toContain(`${turn2Id}:s0`);
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns.filter((t) => t.speaker === "agent")).toHaveLength(2);
+    expect(turns.filter((t) => t.speaker === "agent").every((t) => t.interrupted)).toBe(true);
+  });
+
+  it("M5: a playout-tail barge cancels audio and truncates history", async () => {
+    const sentence = "Hello there friend.";
+    const canned = new Map<string, FakeUtterance>([
+      [
+        sentence,
+        {
+          pcm: makePcm(1.2),
+          words: [
+            { text: "Hello", startS: 0, endS: 0.4, confidence: null },
+            { text: "there", startS: 0.4, endS: 0.8, confidence: null },
+            { text: "friend.", startS: 0.8, endS: 1.2, confidence: null },
+          ],
+        },
+      ],
+    ]);
+    const h = makeHarness({ sttFinals: ["Hi."], llmReplies: [sentence], ttsCanned: canned });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    expect(h.session.currentState).toBe("listening");
+    const turnId = currentTurnId(h);
+
+    // All bytes sent, but the client is still playing: interrupt the tail.
+    await h.session.handleMessage({ type: "playback.progress", utteranceId: turnId, playedMs: 500 });
+    await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+    expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: turnId });
+
+    // Exactly one agent turn stored (no duplicate), history keeps "Hello".
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns.filter((t) => t.speaker === "agent")).toHaveLength(1);
+    h.stt.sessions[0]?.finals.push("Thanks.");
+    h.llm.replies.push("You are welcome.");
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 20 });
+    const lastMessages = h.llm.seenMessages[h.llm.seenMessages.length - 1] ?? [];
+    expect(lastMessages.filter((m) => m.role === "assistant")).toEqual([
+      { role: "assistant", content: "Hello" },
+    ]);
+  });
+
+  it("M5: an acked turn is not barged again", async () => {
+    const h = makeHarness({ sttFinals: ["Hi.", "Again."], llmReplies: ["Hello.", "Hi again."] });
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    const turnId = currentTurnId(h);
+    await h.session.handleMessage({ type: "playback.done", utteranceId: turnId });
+    await h.session.handleMessage({ type: "playback.done", utteranceId: turnId });
+    // Speaking now starts a clean turn: no spurious cancel for the old one.
+    await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+    expect(h.sent.some((m) => m.type === "agent.cancelled")).toBe(false);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 20 });
+    expect(h.session.currentState).toBe("listening");
+  });
+
+  it("barging the hold block stops it without storing a turn", async () => {
+    const h = makeHarness({ sttFinals: ["Hello?"] });
+    const broken = h.llm as unknown as { streamChat: () => AsyncIterable<LlmEvent> };
+    broken.streamChat = (): AsyncIterable<LlmEvent> => {
+      throw new Error("llm boom");
+    };
+    await completeNotice(h);
+    await h.session.handleMessage({ type: "input.speech_ended", atMs: 0 });
+    expect(h.session.currentState).toBe("speaking");
+    await h.session.handleMessage({ type: "input.speech_started", atMs: 10 });
+    expect(h.sent).toContainEqual({ type: "agent.cancelled", utteranceId: "hold" });
+    expect(h.session.currentState).toBe("listening");
+    const turns = h.store.interactions.get(h.interactionId())?.turns ?? [];
+    expect(turns.filter((t) => t.speaker === "agent")).toHaveLength(0);
   });
 
   it("prompts on silence, then ends the session", async () => {

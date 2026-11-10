@@ -87,6 +87,9 @@ export const NOTICE_ACK_TOLERANCE_MS = 250;
 const RECORDING_OBJECTION_RE =
   /\b(don't|do not|stop|please stop)\s+record(ing)?\b|\bno\s+recording\b|\b(stop|turn off)\s+(the\s+)?recording\b/i;
 
+/** Defensive cap on tracked utterances; oldest done entries are evicted first. */
+const MAX_TRACKED_UTTERANCES = 100;
+
 /**
  * One voice conversation. Owns the AgentState machine, the turn loop, barge-in
  * and the notice handshake. Transport-agnostic: the gateway delivers parsed
@@ -291,7 +294,7 @@ export class VoiceSession {
       blockVersion: rendered.block.version,
       blockHash: rendered.hash,
     });
-    this.utterances.set(utteranceId, {
+    this.trackUtterance(utteranceId, {
       id: utteranceId,
       sentences: [
         { sentence: rendered.text, audioBytes: rendered.pcmS16le.length, durationS: rendered.durationS, words: [] },
@@ -305,6 +308,24 @@ export class VoiceSession {
     if (entry) entry.firstSentAtMs = performance.now();
     this.sendPcmAsAudioMessages(utteranceId, rendered.pcmS16le);
     this.deps.send({ type: "agent.audio.end", utteranceId });
+  }
+
+  /** Track an utterance, evicting the oldest done entry past the cap. */
+  private trackUtterance(id: string, entry: ActiveUtterance): void {
+    this.utterances.set(id, entry);
+    if (this.utterances.size <= MAX_TRACKED_UTTERANCES) return;
+    for (const [key, value] of this.utterances) {
+      if (key !== this.currentUtteranceId && value.done) {
+        this.utterances.delete(key);
+        return;
+      }
+    }
+    for (const key of this.utterances.keys()) {
+      if (key !== this.currentUtteranceId) {
+        this.utterances.delete(key);
+        return;
+      }
+    }
   }
 
   private sendPcmAsAudioMessages(utteranceId: string, pcm: Buffer): void {
@@ -330,6 +351,7 @@ export class VoiceSession {
     if (this.state === "notice") {
       if (utteranceId === "notice-disclosure" && this.noticeStage === "disclosure") {
         if (!this.noticeAckPlausible(utteranceId)) return;
+        this.utterances.delete(utteranceId);
         this.noticeStage = "notice";
         this.startNoticeTimer();
         const notice = await this.deps.blocks.render(RECORDING_NOTICE_BLOCK, {
@@ -341,6 +363,7 @@ export class VoiceSession {
       }
       if (utteranceId === "notice-notice" && this.noticeStage === "notice") {
         if (!this.noticeAckPlausible(utteranceId)) return;
+        this.utterances.delete(utteranceId);
         this.clearNoticeTimer();
         this.noticeStage = "none";
         const notice = await this.deps.blocks.render(RECORDING_NOTICE_BLOCK, {
@@ -362,12 +385,18 @@ export class VoiceSession {
       }
     }
     if (utteranceId === "hold" || utteranceId === "silence-prompt") {
+      this.utterances.delete(utteranceId);
       if (!this.ended && this.currentUtteranceId === utteranceId) {
         this.currentUtteranceId = null;
         this.setState("listening");
         this.armSilenceTimer();
       }
+      return;
     }
+    // M5: the client heard the whole turn: release the retained id and prune.
+    // Unknown ids are harmless no-ops (already pruned or never tracked).
+    if (this.currentUtteranceId === utteranceId) this.currentUtteranceId = null;
+    this.utterances.delete(utteranceId);
   }
 
   /**
@@ -400,19 +429,21 @@ export class VoiceSession {
   private handleSpeechStarted(): void {
     this.silencePrompted = false;
     this.clearSilenceTimer();
-    if (this.state === "speaking" || this.state === "thinking") {
-      if (this.currentUtteranceId) {
-        this.bargeIn(0, "speech_started");
-      } else if (this.state === "thinking") {
-        // M1: speech during the STT finalize wait (or the caller-turn write):
-        // abandon the stale turn so the new utterance is neither swallowed
-        // nor merged into it. The stale continuation observes the bumped
-        // turnSeq and returns without emitting anything.
-        this.turnSeq += 1;
-        this.sttSession?.reset();
-        this.setState("listening");
-        this.armSilenceTimer();
-      }
+    if (this.currentUtteranceId) {
+      // Covers speaking/thinking and the M5 playout tail (listening with
+      // agent audio still unacked): cancel and truncate to what was heard.
+      this.bargeIn(0, "speech_started");
+      return;
+    }
+    if (this.state === "thinking") {
+      // M1: speech during the STT finalize wait (or the caller-turn write):
+      // abandon the stale turn so the new utterance is neither swallowed
+      // nor merged into it. The stale continuation observes the bumped
+      // turnSeq and returns without emitting anything.
+      this.turnSeq += 1;
+      this.sttSession?.reset();
+      this.setState("listening");
+      this.armSilenceTimer();
     }
   }
 
@@ -467,8 +498,12 @@ export class VoiceSession {
   ): Promise<void> {
     const agent = this.agent as NonNullable<typeof this.agent>;
     const ttsSession = this.ttsSession as TtsStreamSession;
-    this.llmAbort = new AbortController();
-    this.ttsAbort = new AbortController();
+    // M4: per-turn controller locals; teardown only clears what it owns so a
+    // slow-teardown turn can never unplug the next turn's controllers.
+    const llmAbort = new AbortController();
+    const ttsAbort = new AbortController();
+    this.llmAbort = llmAbort;
+    this.ttsAbort = ttsAbort;
     this.activeTimings = timings;
     this.activeRawReply = "";
     const utterance: ActiveUtterance = {
@@ -478,7 +513,7 @@ export class VoiceSession {
       done: false,
       firstSentAtMs: null,
     };
-    this.utterances.set(turnId, utterance);
+    this.trackUtterance(turnId, utterance);
     this.currentUtteranceId = turnId;
     const messages = this.buildMessages();
     const chunker = new SentenceChunker();
@@ -513,7 +548,7 @@ export class VoiceSession {
         tone: "neutral",
         speed: 1.0,
         contextId,
-        signal: this.ttsAbort?.signal,
+        signal: ttsAbort.signal,
       })) {
         if (myTurn !== this.turnSeq) return;
         if (event.kind === "audio") {
@@ -544,7 +579,7 @@ export class VoiceSession {
     };
 
     try {
-      for await (const event of this.deps.llm.streamChat(messages, { signal: this.llmAbort.signal })) {
+      for await (const event of this.deps.llm.streamChat(messages, { signal: llmAbort.signal })) {
         if (myTurn !== this.turnSeq || this.ended) return;
         if (event.kind === "usage") {
           usage = event.usage;
@@ -570,8 +605,9 @@ export class VoiceSession {
       if (myTurn !== this.turnSeq || this.ended) return;
       throw error;
     } finally {
-      this.llmAbort = null;
-      this.ttsAbort = null;
+      // M4: only clear when the next turn has not already replaced them.
+      if (this.llmAbort === llmAbort) this.llmAbort = null;
+      if (this.ttsAbort === ttsAbort) this.ttsAbort = null;
     }
     if (myTurn !== this.turnSeq || this.ended) return;
     utterance.done = true;
@@ -601,7 +637,9 @@ export class VoiceSession {
       });
     }
     this.logTurn(timings, false);
-    this.currentUtteranceId = null;
+    // M5: the last byte is SENT here, not heard: retain currentUtteranceId
+    // until playback.done so a playout-tail barge-in still cancels the audio
+    // and truncates history to what was heard (AGENTS.md 10.2).
     this.setState("listening");
     this.armSilenceTimer();
   }
@@ -615,19 +653,26 @@ export class VoiceSession {
 
   private handlePlaybackInterrupted(utteranceId: string, playedMs: number): void {
     this.handlePlaybackProgress(utteranceId, playedMs);
-    if (this.state === "speaking" || this.state === "thinking") this.bargeIn(playedMs, "playback.interrupted");
+    // M3: a stale/duplicate interrupt for an old utterance must never kill
+    // the current turn. The id check also covers the M5 playout tail.
+    if (utteranceId !== this.currentUtteranceId || this.currentUtteranceId === null) return;
+    this.bargeIn(playedMs, "playback.interrupted");
   }
 
   private bargeIn(reportedPlayedMs: number, source: string): void {
     const utteranceId = this.currentUtteranceId;
     if (!utteranceId) return;
     const utterance = this.utterances.get(utteranceId);
+    // M5 tail: the turn already completed (full text in history and store).
+    const wasDone = utterance?.done ?? false;
+    const isBlock = utteranceId === "hold" || utteranceId === "silence-prompt";
     this.turnSeq += 1;
     this.llmAbort?.abort();
     this.ttsAbort?.abort();
     this.llmAbort = null;
     this.ttsAbort = null;
     this.currentUtteranceId = null;
+    this.utterances.delete(utteranceId);
     const playedMs = Math.max(reportedPlayedMs, utterance?.playedMs ?? 0);
     const spokenText = utterance ? truncateSpoken(utterance.sentences, playedMs) : "";
     const rawReply = this.activeRawReply;
@@ -635,8 +680,17 @@ export class VoiceSession {
     this.activeTimings = null;
     this.activeRawReply = "";
     this.deps.send({ type: "agent.cancelled", utteranceId });
+    if (wasDone) {
+      // Playout-tail barge: metrics and the full turn were already recorded.
+      // Fix history to what was heard instead of appending a duplicate.
+      this.replaceLastAssistantMessage(spokenText);
+      this.deps.log({ msg: "turn.barged_in", source, playedMs: Math.round(playedMs), tail: true });
+      this.setState("listening");
+      this.armSilenceTimer();
+      return;
+    }
     if (timings) this.deps.send({ type: "turn.metrics", turnId: utteranceId, timingsMs: { ...timings } });
-    if (utterance && !utterance.done && this.interactionId !== null) {
+    if (utterance && !utterance.done && this.interactionId !== null && !isBlock) {
       utterance.done = true;
       if (!this.recordingObjection) {
         this.seq += 1;
@@ -660,14 +714,26 @@ export class VoiceSession {
           .catch((error: unknown) => this.deps.log({ msg: "store.append_turn_failed", error: errorMessage(error) }));
       }
     }
-    // History keeps only what the caller actually heard.
-    if (spokenText !== "") {
+    // History keeps only what the caller actually heard. Fixed fallback
+    // blocks are not model content and stay out of history.
+    if (spokenText !== "" && !isBlock) {
       this.history.push({ role: "assistant", content: spokenText });
       this.trimHistory();
     }
     this.deps.log({ msg: "turn.barged_in", source, playedMs: Math.round(playedMs) });
     this.setState("listening");
     this.armSilenceTimer();
+  }
+
+  /** Replace the last assistant message (M5 tail fix) or drop it if unheard. */
+  private replaceLastAssistantMessage(spokenText: string): void {
+    for (let i = this.history.length - 1; i >= 0; i -= 1) {
+      if (this.history[i]?.role === "assistant") {
+        if (spokenText === "") this.history.splice(i, 1);
+        else this.history[i] = { role: "assistant", content: spokenText };
+        return;
+      }
+    }
   }
 
   // ---------- fallbacks & silence ----------
